@@ -23,19 +23,37 @@ jobs:
         run: dotnet build --no-restore
       - name: Test
         run: |
-          dotnet test --no-build --verbosity normal | tee test_output.log
+          # Create empty log file first to ensure it exists even if tests crash
+          touch test_output.log
+          # Run tests and capture output
+          dotnet test --no-build --verbosity normal | tee -a test_output.log
           TEST_EXIT_CODE=${PIPESTATUS[0]}
+          # Add explicit information about test failures
           if [ $TEST_EXIT_CODE -ne 0 ]; then
-            echo "Tests failed with exit code $TEST_EXIT_CODE"
+            echo "Tests failed with exit code $TEST_EXIT_CODE" | tee -a test_output.log
             exit $TEST_EXIT_CODE
           fi
       - name: Analyze failure with GPT
         if: failure()
         run: |
           echo "Running GPT analysis..."
-          if [ -f test_output.log ]; then
-            echo "### CI Logs" > gpt_input.txt
+          # Create gpt_input.txt file with basic information even if log is missing
+          echo "### CI Logs" > gpt_input.txt
+          echo "Build failed in GitHub Actions" >> gpt_input.txt
+          
+          # Check if test_output.log exists and has content
+          if [ -f test_output.log ] && [ -s test_output.log ]; then
+            echo "Found test_output.log, adding content to analysis" | tee -a gpt_input.txt
+            echo "--- Test Output Log Content ---" >> gpt_input.txt
             tail -n 1000 test_output.log >> gpt_input.txt
+          else
+            echo "Error: test_output.log file not found or empty" | tee -a gpt_input.txt
+            # Try to find any useful information from the workflow
+            echo "--- Attempting to gather build information ---" >> gpt_input.txt
+            find . -name "*.binlog" -o -name "*.log" | xargs ls -la >> gpt_input.txt 2>/dev/null || echo "No log files found"
+            echo "Current directory content:" >> gpt_input.txt
+            ls -la >> gpt_input.txt
+          fi
             
             # Create thread
             THREAD_RESPONSE=$(curl -s -X POST https://api.openai.com/v1/threads \
@@ -164,6 +182,18 @@ jobs:
           fi
       - name: Upload GPT Analysis Artifact
         if: failure()
+        run: |
+          # Ensure the artifacts exist (even if empty) to prevent upload failures
+          touch gpt_input.txt
+          touch gpt_analysis.txt || echo "Failed to create gpt_analysis.txt"
+          touch test_output.log || echo "Failed to create test_output.log"
+          
+          # Display what we're uploading for debugging
+          echo "Files to upload:"
+          ls -la gpt_input.txt gpt_analysis.txt test_output.log || echo "Some files missing"
+      
+      - name: Upload artifacts
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: gpt-analysis
@@ -171,3 +201,4 @@ jobs:
             gpt_input.txt
             gpt_analysis.txt
             test_output.log
+          if-no-files-found: warn
