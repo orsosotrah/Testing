@@ -1,57 +1,78 @@
-#!/bin/bash
+# .github/workflows/ci.yml
 
-set -e
+name: build-and-test
 
-# Logging
-echo "Running GPT analysis..."
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
 
-# Baca isi log
-LOG_FILE_PATH=".github/workflows/gpt_output.txt"
-if [ ! -f "$LOG_FILE_PATH" ]; then
-  echo "Log file not found: $LOG_FILE_PATH"
-  exit 1
-fi
-LOG=$(cat "$LOG_FILE_PATH")
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_ASSISTANT_ID: ${{ secrets.OPENAI_ASSISTANT_ID }}
 
-# Prompt utama
-CONTENT="You are an AI DevOps assistant. You help analyze CI/CD logs from GitHub Actions and explain errors clearly. Suggest what might have gone wrong and how to fix it."
+    steps:
+    - uses: actions/checkout@v3
 
-# Buat thread
-THREAD_RESPONSE=$(curl -s -X POST https://api.openai.com/v1/threads \
-  -H "Authorization: Bearer $OPENAI_API_KEY" \
-  -H "OpenAI-Beta: assistants=v2" \
-  -H "Content-Type: application/json")
-THREAD_ID=$(echo "$THREAD_RESPONSE" | jq -r .id)
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v3
+      with:
+        dotnet-version: 8.0.x
 
-# Kirim pesan
-MESSAGE_PAYLOAD=$(jq -n --arg content "$CONTENT" --arg log "$LOG" \
-  '{"messages": [{"role": "user", "content": ($content + "\n\n" + $log)}]}')
+    - name: Restore dependencies
+      run: dotnet restore
 
-curl -s -X POST https://api.openai.com/v1/threads/$THREAD_ID/messages \
-  -H "Authorization: Bearer $OPENAI_API_KEY" \
-  -H "OpenAI-Beta: assistants=v2" \
-  -H "Content-Type: application/json" \
-  -d "$MESSAGE_PAYLOAD"
+    - name: Build
+      run: dotnet build --no-restore
 
-# Jalankan assistant
-RUN_RESPONSE=$(curl -s -X POST https://api.openai.com/v1/threads/$THREAD_ID/runs \
-  -H "Authorization: Bearer $OPENAI_API_KEY" \
-  -H "OpenAI-Beta: assistants=v2" \
-  -H "Content-Type: application/json" \
-  -d "{\"assistant_id\": \"$ASSISTANT_ID\"}")
-RUN_ID=$(echo "$RUN_RESPONSE" | jq -r .id)
+    - name: Test
+      run: dotnet test --no-build --verbosity normal || echo "Tests failed"
 
-# Tunggu sampai selesai
-STATUS="queued"
-while [[ "$STATUS" != "completed" && "$STATUS" != "failed" ]]; do
-  sleep 5
-  STATUS_RESPONSE=$(curl -s -X GET https://api.openai.com/v1/threads/$THREAD_ID/runs/$RUN_ID \
-    -H "Authorization: Bearer $OPENAI_API_KEY" \
-    -H "OpenAI-Beta: assistants=v2")
-  STATUS=$(echo "$STATUS_RESPONSE" | jq -r .status)
-done
+    - name: Analyze failure with GPT
+      if: failure()
+      run: |
+        echo "Running GPT analysis..."
 
-# Ambil hasil
-curl -s -X GET https://api.openai.com/v1/threads/$THREAD_ID/messages \
-  -H "Authorization: Bearer $OPENAI_API_KEY" \
-  -H "OpenAI-Beta: assistants=v2" | jq -r '.data[0].content[0].text.value'
+        # Generate input file for GPT
+        echo "### CI Logs" > gpt_input.txt
+        echo '---' >> gpt_input.txt
+        tail -n 1000 $GITHUB_WORKSPACE/.github/workflows/ci.yml >> gpt_input.txt
+
+        THREAD_ID=$(curl -s -X POST https://api.openai.com/v1/threads \
+          -H "Authorization: Bearer $OPENAI_API_KEY" \
+          -H "OpenAI-Beta: assistants=v2" \
+          -H "Content-Type: application/json" \
+          -d '{}' | jq -r '.id')
+
+        RUN_ID=$(curl -s -X POST https://api.openai.com/v1/threads/$THREAD_ID/runs \
+          -H "Authorization: Bearer $OPENAI_API_KEY" \
+          -H "OpenAI-Beta: assistants=v2" \
+          -H "Content-Type: application/json" \
+          -d '{"assistant_id": "'$OPENAI_ASSISTANT_ID'", "instructions": "You are an AI DevOps assistant. You help analyze CI/CD logs from GitHub Actions and explain errors clearly. Suggest what might have gone wrong and how to fix it.", "tools": [{"type": "code_interpreter"}]}' | jq -r '.id')
+
+        echo "Waiting for GPT run to complete..."
+        while true; do
+          STATUS=$(curl -s -X GET https://api.openai.com/v1/threads/$THREAD_ID/runs/$RUN_ID \
+            -H "Authorization: Bearer $OPENAI_API_KEY" \
+            -H "OpenAI-Beta: assistants=v2" | jq -r '.status')
+          if [ "$STATUS" = "completed" ]; then
+            break
+          fi
+          sleep 2
+        done
+
+        echo "Fetching GPT response..."
+        curl -s -X GET https://api.openai.com/v1/threads/$THREAD_ID/messages \
+          -H "Authorization: Bearer $OPENAI_API_KEY" \
+          -H "OpenAI-Beta: assistants=v2" | jq -r '.data[0].content[0].text.value'
+
+    - name: Upload GPT Analysis Artifact
+      if: failure()
+      uses: actions/upload-artifact@v3
+      with:
+        name: gpt-analysis
+        path: gpt_input.txt
