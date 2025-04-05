@@ -13,6 +13,11 @@ jobs:
       OPENAI_ASSISTANT_ID: ${{ secrets.OPENAI_ASSISTANT_ID }}
     steps:
       - uses: actions/checkout@v3
+      
+      # Create logs directory at the beginning of the workflow
+      - name: Create logs directory
+        run: mkdir -p logs
+        
       - name: Setup .NET
         uses: actions/setup-dotnet@v3
         with:
@@ -23,22 +28,23 @@ jobs:
         run: dotnet build --no-restore
       - name: Test
         run: |
-          # Create empty log file first to ensure it exists even if tests crash
-          mkdir -p logs
-          touch logs/test_output.log
           # Run tests and capture output
-          dotnet test --no-build --verbosity normal | tee -a logs/test_output.log
+          dotnet test --no-build --verbosity normal | tee logs/test_output.log
           TEST_EXIT_CODE=${PIPESTATUS[0]}
           # Add explicit information about test failures
           if [ $TEST_EXIT_CODE -ne 0 ]; then
             echo "Tests failed with exit code $TEST_EXIT_CODE" | tee -a logs/test_output.log
             exit $TEST_EXIT_CODE
           fi
+      
       - name: Analyze failure with GPT
         if: failure()
         run: |
+          # Ensure logs directory exists again (in case the job was restarted)
+          mkdir -p logs
+          
           echo "Running GPT analysis..."
-          # Create gpt_input.txt file with basic information even if log is missing
+          # Create gpt_input.txt file with basic information
           echo "### CI Logs" > logs/gpt_input.txt
           echo "Build failed in GitHub Actions" >> logs/gpt_input.txt
           
@@ -54,6 +60,7 @@ jobs:
             find . -name "*.binlog" -o -name "*.log" | xargs ls -la >> logs/gpt_input.txt 2>/dev/null || echo "No log files found"
             echo "Current directory content:" >> logs/gpt_input.txt
             ls -la >> logs/gpt_input.txt
+            ls -la logs >> logs/gpt_input.txt 2>/dev/null || echo "logs directory not found"
           fi
           
           # Create thread
@@ -179,28 +186,10 @@ jobs:
             echo "GPT run did not complete successfully. Status: $STATUS"
           fi
       
-      - name: Upload GPT Analysis Artifact
-        if: failure()
-        run: |
-          # Ensure the artifacts directory exists
-          mkdir -p logs
-          
-          # Ensure the artifacts exist (even if empty) to prevent upload failures
-          touch logs/gpt_input.txt || echo "Failed to create gpt_input.txt"
-          touch logs/gpt_analysis.txt || echo "Failed to create gpt_analysis.txt"
-          touch logs/test_output.log || echo "Failed to create test_output.log"
-          
-          # Display what we're uploading for debugging
-          echo "Files to upload:"
-          ls -la logs/gpt_input.txt logs/gpt_analysis.txt logs/test_output.log || echo "Some files missing"
-      
       - name: Upload artifacts
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: gpt-analysis
-          path: |
-            logs/gpt_input.txt
-            logs/gpt_analysis.txt
-            logs/test_output.log
+          path: logs/
           if-no-files-found: warn
