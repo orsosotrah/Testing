@@ -20,3 +20,24 @@ jobs:
         run: dotnet build --no-restore
       - name: Test
         run: dotnet test --no-build --verbosity normal
+      - name: Analyze failure with GPT
+        if: failure()
+        run: curl -X POST https://api.openai.com/v1/threads \
+          -H "Authorization: Bearer {{ secrets.OPENAI_API_KEY }}" \
+          -H "Content-Type: application/json" \
+          -d '{
+            "messages": [
+              {
+                "role": "user",
+                "content": "CI job failed. Log: {{github_logs}}"
+             }
+            ]
+          }' \
+          | tee -a > thread.json
+
+          THEEAD_ID=$(jq -r .id thread.json)
+
+          curl -X POST "https://api.openai.com/v1/threads/${THREAD_ID}/runs" \
+          -H "Authorization: Bearer {{ secrets.OPENAI_API_KEY }}" \
+          -H "Content-Type: application/json" \
+          -d '{"assistant_id": "asst_BWuA2NrBrsQZRoyB7vqGDYEh"}'
