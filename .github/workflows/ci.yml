@@ -60,7 +60,7 @@ jobs:
       - name: Show GPT Analysis
         run: cat gpt_output.txt
       - name: Upload GPT Analysis Artifact
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v4
         with:
           name: gpt-analysis
           path: gpt_output.txt
