@@ -170,7 +170,7 @@ namespace DesignPatterns.Creational
             Console.WriteLine("\nUsing Simple Factory:");
             SimpleVehicleFactory simpleFactory = new SimpleVehicleFactory();
             IVehicle simpleCar = simpleFactory.CreateVehicle(SimpleVehicleFactory.VehicleType.Car);
-            simpleCar.Drive()
+            simpleCar.Drive();
         }
     }
 }
