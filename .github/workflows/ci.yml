@@ -78,7 +78,7 @@ jobs:
 
     - name: Upload GPT Analysis Artifact
       if: failure()
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: gpt-analysis
         path: gpt_analysis.txt
