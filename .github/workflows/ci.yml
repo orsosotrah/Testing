@@ -24,13 +24,14 @@ jobs:
       - name: Test
         run: |
           # Create empty log file first to ensure it exists even if tests crash
-          touch test_output.log
+          mkdir -p logs
+          touch logs/test_output.log
           # Run tests and capture output
-          dotnet test --no-build --verbosity normal | tee -a test_output.log
+          dotnet test --no-build --verbosity normal | tee -a logs/test_output.log
           TEST_EXIT_CODE=${PIPESTATUS[0]}
           # Add explicit information about test failures
           if [ $TEST_EXIT_CODE -ne 0 ]; then
-            echo "Tests failed with exit code $TEST_EXIT_CODE" | tee -a test_output.log
+            echo "Tests failed with exit code $TEST_EXIT_CODE" | tee -a logs/test_output.log
             exit $TEST_EXIT_CODE
           fi
       - name: Analyze failure with GPT
@@ -38,159 +39,160 @@ jobs:
         run: |
           echo "Running GPT analysis..."
           # Create gpt_input.txt file with basic information even if log is missing
-          echo "### CI Logs" > gpt_input.txt
-          echo "Build failed in GitHub Actions" >> gpt_input.txt
+          echo "### CI Logs" > logs/gpt_input.txt
+          echo "Build failed in GitHub Actions" >> logs/gpt_input.txt
           
           # Check if test_output.log exists and has content
-          if [ -f test_output.log ] && [ -s test_output.log ]; then
-            echo "Found test_output.log, adding content to analysis" | tee -a gpt_input.txt
-            echo "--- Test Output Log Content ---" >> gpt_input.txt
-            tail -n 1000 test_output.log >> gpt_input.txt
+          if [ -f logs/test_output.log ] && [ -s logs/test_output.log ]; then
+            echo "Found test_output.log, adding content to analysis" | tee -a logs/gpt_input.txt
+            echo "--- Test Output Log Content ---" >> logs/gpt_input.txt
+            tail -n 1000 logs/test_output.log >> logs/gpt_input.txt
           else
-            echo "Error: test_output.log file not found or empty" | tee -a gpt_input.txt
+            echo "Error: test_output.log file not found or empty" | tee -a logs/gpt_input.txt
             # Try to find any useful information from the workflow
-            echo "--- Attempting to gather build information ---" >> gpt_input.txt
-            find . -name "*.binlog" -o -name "*.log" | xargs ls -la >> gpt_input.txt 2>/dev/null || echo "No log files found"
-            echo "Current directory content:" >> gpt_input.txt
-            ls -la >> gpt_input.txt
+            echo "--- Attempting to gather build information ---" >> logs/gpt_input.txt
+            find . -name "*.binlog" -o -name "*.log" | xargs ls -la >> logs/gpt_input.txt 2>/dev/null || echo "No log files found"
+            echo "Current directory content:" >> logs/gpt_input.txt
+            ls -la >> logs/gpt_input.txt
           fi
+          
+          # Create thread
+          THREAD_RESPONSE=$(curl -s -X POST https://api.openai.com/v1/threads \
+            -H "Authorization: Bearer $OPENAI_API_KEY" \
+            -H "OpenAI-Beta: assistants=v2" \
+            -H "Content-Type: application/json" \
+            -d '{}')
+          
+          if [ -z "$THREAD_RESPONSE" ]; then
+            echo "Error: Empty response from OpenAI when creating thread"
+            exit 1
+          fi
+          
+          THREAD_ID=$(echo $THREAD_RESPONSE | jq -r '.id')
+          
+          if [ -z "$THREAD_ID" ] || [ "$THREAD_ID" = "null" ]; then
+            echo "Error: Failed to get thread ID from response"
+            echo "Response: $THREAD_RESPONSE"
+            exit 1
+          fi
+          
+          # Add message to thread
+          MESSAGE_RESPONSE=$(curl -s -X POST https://api.openai.com/v1/threads/$THREAD_ID/messages \
+            -H "Authorization: Bearer $OPENAI_API_KEY" \
+            -H "OpenAI-Beta: assistants=v2" \
+            -H "Content-Type: application/json" \
+            -d "{\"role\": \"user\", \"content\": $(cat logs/gpt_input.txt | jq -Rs .)}")
+          
+          # Create run
+          RUN_RESPONSE=$(curl -s -X POST https://api.openai.com/v1/threads/$THREAD_ID/runs \
+            -H "Authorization: Bearer $OPENAI_API_KEY" \
+            -H "OpenAI-Beta: assistants=v2" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "assistant_id": "'$OPENAI_ASSISTANT_ID'", 
+              "instructions": "You are an AI DevOps assistant. You help analyze CI/CD logs from GitHub Actions and explain errors clearly. Suggest what might have gone wrong and how to fix it.", 
+              "tools": [{"type": "code_interpreter"}]
+            }')
+          
+          if [ -z "$RUN_RESPONSE" ]; then
+            echo "Error: Empty response from OpenAI when creating run"
+            exit 1
+          fi
+          
+          RUN_ID=$(echo $RUN_RESPONSE | jq -r '.id')
+          
+          if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+            echo "Error: Failed to get run ID from response"
+            echo "Response: $RUN_RESPONSE"
+            exit 1
+          fi
+          
+          echo "Waiting for GPT run to complete..."
+          
+          # Add timeout to prevent infinite loop
+          TIMEOUT=300  # 5 minutes
+          START_TIME=$(date +%s)
+          
+          while true; do
+            CURRENT_TIME=$(date +%s)
+            ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
             
-            # Create thread
-            THREAD_RESPONSE=$(curl -s -X POST https://api.openai.com/v1/threads \
+            if [ $ELAPSED_TIME -gt $TIMEOUT ]; then
+              echo "Timeout waiting for GPT run to complete after $TIMEOUT seconds"
+              break
+            fi
+            
+            STATUS_RESPONSE=$(curl -s -X GET https://api.openai.com/v1/threads/$THREAD_ID/runs/$RUN_ID \
               -H "Authorization: Bearer $OPENAI_API_KEY" \
-              -H "OpenAI-Beta: assistants=v2" \
-              -H "Content-Type: application/json" \
-              -d '{}')
+              -H "OpenAI-Beta: assistants=v2")
             
-            if [ -z "$THREAD_RESPONSE" ]; then
-              echo "Error: Empty response from OpenAI when creating thread"
-              exit 1
-            fi
-            
-            THREAD_ID=$(echo $THREAD_RESPONSE | jq -r '.id')
-            
-            if [ -z "$THREAD_ID" ] || [ "$THREAD_ID" = "null" ]; then
-              echo "Error: Failed to get thread ID from response"
-              echo "Response: $THREAD_RESPONSE"
-              exit 1
-            fi
-            
-            # Add message to thread
-            MESSAGE_RESPONSE=$(curl -s -X POST https://api.openai.com/v1/threads/$THREAD_ID/messages \
-              -H "Authorization: Bearer $OPENAI_API_KEY" \
-              -H "OpenAI-Beta: assistants=v2" \
-              -H "Content-Type: application/json" \
-              -d "{\"role\": \"user\", \"content\": $(cat gpt_input.txt | jq -Rs .)}")
-            
-            # Create run
-            RUN_RESPONSE=$(curl -s -X POST https://api.openai.com/v1/threads/$THREAD_ID/runs \
-              -H "Authorization: Bearer $OPENAI_API_KEY" \
-              -H "OpenAI-Beta: assistants=v2" \
-              -H "Content-Type: application/json" \
-              -d '{
-                "assistant_id": "'$OPENAI_ASSISTANT_ID'", 
-                "instructions": "You are an AI DevOps assistant. You help analyze CI/CD logs from GitHub Actions and explain errors clearly. Suggest what might have gone wrong and how to fix it.", 
-                "tools": [{"type": "code_interpreter"}]
-              }')
-            
-            if [ -z "$RUN_RESPONSE" ]; then
-              echo "Error: Empty response from OpenAI when creating run"
-              exit 1
-            fi
-            
-            RUN_ID=$(echo $RUN_RESPONSE | jq -r '.id')
-            
-            if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
-              echo "Error: Failed to get run ID from response"
-              echo "Response: $RUN_RESPONSE"
-              exit 1
-            fi
-            
-            echo "Waiting for GPT run to complete..."
-            
-            # Add timeout to prevent infinite loop
-            TIMEOUT=300  # 5 minutes
-            START_TIME=$(date +%s)
-            
-            while true; do
-              CURRENT_TIME=$(date +%s)
-              ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
-              
-              if [ $ELAPSED_TIME -gt $TIMEOUT ]; then
-                echo "Timeout waiting for GPT run to complete after $TIMEOUT seconds"
-                break
-              fi
-              
-              STATUS_RESPONSE=$(curl -s -X GET https://api.openai.com/v1/threads/$THREAD_ID/runs/$RUN_ID \
-                -H "Authorization: Bearer $OPENAI_API_KEY" \
-                -H "OpenAI-Beta: assistants=v2")
-              
-              if [ -z "$STATUS_RESPONSE" ]; then
-                echo "Error: Empty response when checking run status"
-                sleep 5
-                continue
-              fi
-              
-              STATUS=$(echo $STATUS_RESPONSE | jq -r '.status')
-              
-              if [ -z "$STATUS" ] || [ "$STATUS" = "null" ]; then
-                echo "Error: Failed to get status from response"
-                echo "Response: $STATUS_RESPONSE"
-                sleep 5
-                continue
-              fi
-              
-              echo "Current status: $STATUS"
-              
-              if [ "$STATUS" = "completed" ]; then
-                break
-              elif [ "$STATUS" = "failed" ] || [ "$STATUS" = "cancelled" ] || [ "$STATUS" = "expired" ]; then
-                echo "GPT run $STATUS"
-                break
-              fi
-              
+            if [ -z "$STATUS_RESPONSE" ]; then
+              echo "Error: Empty response when checking run status"
               sleep 5
-            done
+              continue
+            fi
+            
+            STATUS=$(echo $STATUS_RESPONSE | jq -r '.status')
+            
+            if [ -z "$STATUS" ] || [ "$STATUS" = "null" ]; then
+              echo "Error: Failed to get status from response"
+              echo "Response: $STATUS_RESPONSE"
+              sleep 5
+              continue
+            fi
+            
+            echo "Current status: $STATUS"
             
             if [ "$STATUS" = "completed" ]; then
-              echo "Fetching GPT response..."
-              MESSAGES_RESPONSE=$(curl -s -X GET https://api.openai.com/v1/threads/$THREAD_ID/messages \
-                -H "Authorization: Bearer $OPENAI_API_KEY" \
-                -H "OpenAI-Beta: assistants=v2")
-              
-              if [ -z "$MESSAGES_RESPONSE" ]; then
-                echo "Error: Empty response when fetching messages"
-                exit 1
-              fi
-              
-              ANALYSIS=$(echo $MESSAGES_RESPONSE | jq -r '.data[0].content[0].text.value')
-              
-              if [ -z "$ANALYSIS" ] || [ "$ANALYSIS" = "null" ]; then
-                echo "Error: Failed to extract analysis from response"
-                echo "Response: $MESSAGES_RESPONSE"
-                exit 1
-              fi
-              
-              echo "GPT Analysis:"
-              echo "$ANALYSIS"
-              echo "$ANALYSIS" > gpt_analysis.txt
-            else
-              echo "GPT run did not complete successfully. Status: $STATUS"
+              break
+            elif [ "$STATUS" = "failed" ] || [ "$STATUS" = "cancelled" ] || [ "$STATUS" = "expired" ]; then
+              echo "GPT run $STATUS"
+              break
             fi
+            
+            sleep 5
+          done
+          
+          if [ "$STATUS" = "completed" ]; then
+            echo "Fetching GPT response..."
+            MESSAGES_RESPONSE=$(curl -s -X GET https://api.openai.com/v1/threads/$THREAD_ID/messages \
+              -H "Authorization: Bearer $OPENAI_API_KEY" \
+              -H "OpenAI-Beta: assistants=v2")
+            
+            if [ -z "$MESSAGES_RESPONSE" ]; then
+              echo "Error: Empty response when fetching messages"
+              exit 1
+            fi
+            
+            ANALYSIS=$(echo $MESSAGES_RESPONSE | jq -r '.data[0].content[0].text.value')
+            
+            if [ -z "$ANALYSIS" ] || [ "$ANALYSIS" = "null" ]; then
+              echo "Error: Failed to extract analysis from response"
+              echo "Response: $MESSAGES_RESPONSE"
+              exit 1
+            fi
+            
+            echo "GPT Analysis:"
+            echo "$ANALYSIS"
+            echo "$ANALYSIS" > logs/gpt_analysis.txt
           else
-            echo "Error: test_output.log file not found"
+            echo "GPT run did not complete successfully. Status: $STATUS"
           fi
+      
       - name: Upload GPT Analysis Artifact
         if: failure()
         run: |
+          # Ensure the artifacts directory exists
+          mkdir -p logs
+          
           # Ensure the artifacts exist (even if empty) to prevent upload failures
-          touch gpt_input.txt
-          touch gpt_analysis.txt || echo "Failed to create gpt_analysis.txt"
-          touch test_output.log || echo "Failed to create test_output.log"
+          touch logs/gpt_input.txt || echo "Failed to create gpt_input.txt"
+          touch logs/gpt_analysis.txt || echo "Failed to create gpt_analysis.txt"
+          touch logs/test_output.log || echo "Failed to create test_output.log"
           
           # Display what we're uploading for debugging
           echo "Files to upload:"
-          ls -la gpt_input.txt gpt_analysis.txt test_output.log || echo "Some files missing"
+          ls -la logs/gpt_input.txt logs/gpt_analysis.txt logs/test_output.log || echo "Some files missing"
       
       - name: Upload artifacts
         if: failure()
@@ -198,7 +200,7 @@ jobs:
         with:
           name: gpt-analysis
           path: |
-            gpt_input.txt
-            gpt_analysis.txt
-            test_output.log
+            logs/gpt_input.txt
+            logs/gpt_analysis.txt
+            logs/test_output.log
           if-no-files-found: warn
