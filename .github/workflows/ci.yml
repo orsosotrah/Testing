@@ -193,3 +193,19 @@ jobs:
           name: gpt-analysis
           path: logs/
           if-no-files-found: warn
+          
+      - name: Post GPT analysis to PR comment
+        if: failure() && github.event_name == 'pull_request'
+        run: |
+          if [ ! -f logs/gpt_analysis.txt ]; then
+            echo "GPT analysis file not found"
+            exit 1
+          fi
+
+          BODY=$(jq -Rs . < logs/gpt_analysis.txt)
+
+          curl -s -X POST \
+            -H "Authorization: Bearer ${{ github.token }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"body\": $BODY}" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments"
