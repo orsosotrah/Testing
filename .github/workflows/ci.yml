@@ -97,7 +97,7 @@ jobs:
             -H "Content-Type: application/json" \
             -d '{
               "assistant_id": "'$OPENAI_ASSISTANT_ID'", 
-              "instructions": "You are an AI DevOps assistant. You help analyze CI/CD logs from GitHub Actions and explain errors clearly. Suggest what might have gone wrong and how to fix it.", 
+              "instructions": "Kamu adalah asisten AI DevOps. Kamu membantu menganalisis log CI/CD dari GitHub Actions dan menjelaskan kesalahan dengan jelas. Kamu juga menyarankan apa yang mungkin salah dan bagaimana cara memperbaikinya.", 
               "tools": [{"type": "code_interpreter"}]
             }')
           
