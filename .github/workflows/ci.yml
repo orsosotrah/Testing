@@ -1,155 +1,66 @@
-# .github/workflows/ci-simplified.yml
-name: build-and-test-minimal
+name: Dynamic CI
+
 on:
   push:
     branches: ["main"]
   pull_request:
     branches: ["main"]
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
     steps:
       - uses: actions/checkout@v3
-      
       - name: Setup .NET
         uses: actions/setup-dotnet@v3
         with:
           dotnet-version: 8.0.x
-      
       - name: Restore dependencies
         run: dotnet restore
-      
       - name: Build
         run: dotnet build --no-restore
-      
       - name: Test
         run: dotnet test --no-build --verbosity normal
-      
-      - name: Analyze failure with AI
-        if: failure()
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      - name: Analyze failure with Claude
+        if: failure() && env.ANTHROPIC_API_KEY != ''
         run: |
-          echo "Collecting build information..."
+          SYSTEM_PROMPT="You are an AI DevOps assistant. Analyze CI/CD logs and explain errors clearly."
+          USER_PROMPT="Build failed in GitHub Actions. Please analyze the error and provide suggestions to fix it."
           
-          # Create a temporary file for the error context
-          echo "### CI Build Failure" > error_context.txt
-          echo "Repository: $GITHUB_REPOSITORY" >> error_context.txt
-          echo "Workflow: $GITHUB_WORKFLOW" >> error_context.txt
-          echo "Branch: $GITHUB_REF" >> error_context.txt
-          echo "" >> error_context.txt
+          CLAUDE_RESPONSE=$(curl -s -X POST https://api.anthropic.com/v1/complete \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "content-type: application/json" \
+            -d '{
+              "prompt": "'$SYSTEM_PROMPT'\n\n'$USER_PROMPT'",
+              "model": "claude-instant-1",
+              "max_tokens_to_sample": 1000,
+              "temperature": 0
+            }')
           
-          # Find and include relevant files with errors
-          echo "### Source Files with Potential Errors" >> error_context.txt
-          for file in $(find . -name "*.cs" -type f -exec grep -l "error\|XXXX\|fail" {} \; 2>/dev/null || echo ""); do
-            if [ -n "$file" ]; then
-              echo "File: $file" >> error_context.txt
-              echo "```csharp" >> error_context.txt
-              cat "$file" >> error_context.txt
-              echo "```" >> error_context.txt
-              echo "" >> error_context.txt
-            fi
-          done
+          ANALYSIS=$(echo "$CLAUDE_RESPONSE" | jq -r '.completion')
+          echo "Claude Analysis:"
+          echo "$ANALYSIS"
+      
+      - name: Analyze failure with ChatGPT
+        if: failure() && env.OPENAI_API_KEY != '' && env.ANTHROPIC_API_KEY == ''  
+        run: |
+          SYSTEM_PROMPT="You are an AI DevOps assistant. Analyze CI/CD logs and explain errors clearly."
+          USER_PROMPT="Build failed in GitHub Actions. Please analyze the error and provide suggestions to fix it."
           
-          ERROR_CONTENT=$(cat error_context.txt)
-          SYSTEM_PROMPT="You are an AI DevOps assistant. Analyze CI/CD logs from GitHub Actions and explain errors clearly."
+          CHATGPT_RESPONSE=$(curl -s -X POST https://api.openai.com/v1/completions \
+            -H "Authorization: Bearer $OPENAI_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "model": "text-davinci-003",
+              "prompt": "'$SYSTEM_PROMPT'\n\n'$USER_PROMPT'",
+              "max_tokens": 1000,
+              "temperature": 0
+            }')
           
-          # Determine which AI to use based on available keys
-          if [ -n "$ANTHROPIC_API_KEY" ]; then
-            echo "Using Claude API for analysis..."
-            
-            # Create JSON file manually without using jq
-            cat > claude_request.json << EOF
-{
-  "model": "claude-3-haiku-20240307",
-  "max_tokens": 1000,
-  "system": "$SYSTEM_PROMPT",
-  "messages": [
-    {
-      "role": "user",
-      "content": $(python3 -c "import json; print(json.dumps(open('error_context.txt').read()))")
-    }
-  ]
-}
-EOF
-            
-            # Display JSON for debugging
-            echo "Request content (first 100 chars):"
-            head -c 100 claude_request.json
-            
-            # Call Claude API with properly formed JSON
-            CLAUDE_RESPONSE=$(curl -s -X POST https://api.anthropic.com/v1/messages \
-              -H "x-api-key: $ANTHROPIC_API_KEY" \
-              -H "anthropic-version: 2023-06-01" \
-              -H "content-type: application/json" \
-              -d @claude_request.json)
-            
-            # Save response for debugging
-            echo "$CLAUDE_RESPONSE" > claude_response.json
-            
-            # Extract and display analysis (without jq)
-            if echo "$CLAUDE_RESPONSE" | grep -q "content"; then
-              ANALYSIS=$(python3 -c "import json, sys; print(json.loads(sys.stdin.read())['content'][0]['text'])" <<< "$CLAUDE_RESPONSE")
-              echo "## 🤖 Claude Analysis"
-              echo "$ANALYSIS"
-            else
-              echo "❌ Error getting analysis from Claude API"
-              echo "API Response first 100 chars:"
-              echo "$CLAUDE_RESPONSE" | head -c 300
-            fi
-            
-          elif [ -n "$OPENAI_API_KEY" ]; then
-            echo "Using OpenAI Chat Completions API for analysis..."
-            
-            # Create JSON file manually without using jq
-            cat > openai_request.json << EOF
-{
-  "model": "gpt-4o",
-  "messages": [
-    {
-      "role": "system", 
-      "content": "$SYSTEM_PROMPT"
-    },
-    {
-      "role": "user",
-      "content": $(python3 -c "import json; print(json.dumps(open('error_context.txt').read()))")
-    }
-  ],
-  "max_tokens": 1000
-}
-EOF
-            
-            # Display JSON for debugging
-            echo "Request content (first 100 chars):"
-            head -c 100 openai_request.json
-            
-            # Call OpenAI Chat Completions API with properly formed JSON
-            GPT_RESPONSE=$(curl -s -X POST https://api.openai.com/v1/chat/completions \
-              -H "Authorization: Bearer $OPENAI_API_KEY" \
-              -H "Content-Type: application/json" \
-              -d @openai_request.json)
-            
-            # Save response for debugging
-            echo "$GPT_RESPONSE" > openai_response.json
-            
-            # Extract and display the analysis (without jq)
-            if echo "$GPT_RESPONSE" | grep -q "choices"; then
-              ANALYSIS=$(python3 -c "import json, sys; print(json.loads(sys.stdin.read())['choices'][0]['message']['content'])" <<< "$GPT_RESPONSE")
-              echo "## 🤖 ChatGPT Analysis"
-              echo "$ANALYSIS"
-            else
-              echo "❌ Error getting analysis from OpenAI API"
-              echo "API Response first 100 chars:"
-              echo "$GPT_RESPONSE" | head -c 300
-            fi
-            
-          else
-            echo "Using fallback analysis (no AI API keys found)..."
-            echo "## ⚠️ Build Failure"
-            echo "The build process failed. Please check the logs above for specific error messages."
-            echo "To enable AI-powered error analysis, add either ANTHROPIC_API_KEY or OPENAI_API_KEY to your repository secrets."
-          fi
-          
-          # Clean up temp files
-          rm -f error_context.txt claude_request.json openai_request.json claude_response.json openai_response.json
+          ANALYSIS=$(echo "$CHATGPT_RESPONSE" | jq -r '.choices[0].text')  
+          echo "ChatGPT Analysis:"
+          echo "$ANALYSIS"
