@@ -18,12 +18,70 @@ jobs:
         uses: actions/setup-dotnet@v3
         with:
           dotnet-version: 8.0.x
+      
+      # Tambahkan langkah diagnosa untuk menemukan solution/project
+      - name: Find solution files
+        run: |
+          echo "Mencari solusi dan project files..."
+          find . -name "*.sln" -o -name "*.csproj" | tee project_files.txt
+          
       - name: Restore dependencies
-        run: dotnet restore
+        run: |
+          # Cek apakah ada file solution
+          if ls *.sln 1> /dev/null 2>&1; then
+            echo "Solution file ditemukan"
+            dotnet restore
+          # Cek apakah ada file project
+          elif ls *.csproj 1> /dev/null 2>&1; then
+            echo "Project file ditemukan di direktori root"
+            dotnet restore
+          # Cari file solution/project di subdirektori
+          elif [ -s project_files.txt ]; then
+            echo "Menggunakan file project/solution yang ditemukan"
+            PROJECT_FILE=$(head -n 1 project_files.txt)
+            echo "Menggunakan file: $PROJECT_FILE"
+            dotnet restore "$PROJECT_FILE"
+          else
+            echo "KESALAHAN: Tidak dapat menemukan project atau solution file"
+            find . -type f | grep -v "/\.git/" > all_files.txt
+            echo "Semua file dalam repositori:"
+            cat all_files.txt
+            exit 1
+          fi
       - name: Build
-        run: dotnet build --no-restore -v d > build.log 2>&1 || (cat build.log && exit 1)
+        run: |
+          # Gunakan variabel PROJECT_FILE jika ada
+          if [ -s project_files.txt ]; then
+            PROJECT_FILE=$(head -n 1 project_files.txt)
+            echo "Membangun project: $PROJECT_FILE"
+            dotnet build "$PROJECT_FILE" --no-restore -v d > build.log 2>&1 || (cat build.log && exit 1)
+          else
+            # Coba build di direktori saat ini
+            if ls *.sln 1> /dev/null 2>&1 || ls *.csproj 1> /dev/null 2>&1; then
+              echo "Membangun project di direktori saat ini"
+              dotnet build --no-restore -v d > build.log 2>&1 || (cat build.log && exit 1)
+            else
+              echo "KESALAHAN: Tidak dapat menemukan file untuk build" | tee build.log
+              exit 1
+            fi
+          fi
+          
       - name: Test
-        run: dotnet test --no-build --verbosity normal --logger "trx" || true
+        run: |
+          # Gunakan variabel PROJECT_FILE jika ada
+          if [ -s project_files.txt ]; then
+            PROJECT_FILE=$(head -n 1 project_files.txt)
+            echo "Menjalankan test untuk: $PROJECT_FILE"
+            dotnet test "$PROJECT_FILE" --no-build --verbosity normal --logger "trx" || true
+          else
+            # Coba test di direktori saat ini
+            if ls *.sln 1> /dev/null 2>&1 || ls *.csproj 1> /dev/null 2>&1; then
+              echo "Menjalankan test di direktori saat ini"
+              dotnet test --no-build --verbosity normal --logger "trx" || true
+            else
+              echo "KESALAHAN: Tidak dapat menemukan file untuk test"
+            fi
+          fi
 
       - name: Create error log file
         if: failure()
@@ -32,6 +90,18 @@ jobs:
           echo "## Build Failure Log" > error_log.txt
           echo "Error occurred during the build process." >> error_log.txt
           echo '```' >> error_log.txt
+          
+          # Tambahkan informasi repository
+          echo "## Repository Information" >> error_log.txt
+          echo "Repository structure:" >> error_log.txt
+          find . -type f -not -path "*/\.*" | sort >> error_log.txt
+          
+          # Tangkap error MSB1003 jika ada
+          if grep -q "MSB1003" build.log 2>/dev/null; then
+            echo "## MSB1003 Error Detected" >> error_log.txt
+            echo "Error: Tidak dapat menemukan project atau solution file." >> error_log.txt
+            echo "Working directory: $(pwd)" >> error_log.txt
+          fi
           
           # Capture more comprehensive error information
           echo "## Build Log" >> error_log.txt
@@ -138,7 +208,7 @@ jobs:
       
       - name: Upload error logs as artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v3
         with:
           name: error-logs
           path: |
