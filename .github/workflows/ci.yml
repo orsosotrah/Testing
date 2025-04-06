@@ -31,17 +31,26 @@ jobs:
           SYSTEM_PROMPT="You are an AI DevOps assistant. Analyze CI/CD logs and explain errors clearly."
           USER_PROMPT="Build failed in GitHub Actions. Please analyze the error and provide suggestions to fix it."
           
-          CLAUDE_RESPONSE=$(curl -s -X POST https://api.anthropic.com/v1/complete \
+          # Mengambil log error dari langkah sebelumnya
+          ERROR_LOG=$(cat $GITHUB_STEP_SUMMARY)
+          
+          CLAUDE_RESPONSE=$(curl -s -X POST https://api.anthropic.com/v1/messages \
             -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
             -H "content-type: application/json" \
             -d '{
-              "prompt": "'"$SYSTEM_PROMPT"'\n'"$USER_PROMPT"'",
-              "model": "claude-instant-v1",
-              "max_tokens_to_sample": 1000,
-              "temperature": 0
+              "model": "claude-3-haiku-20240307",
+              "max_tokens": 1000,
+              "system": "'"$SYSTEM_PROMPT"'",
+              "messages": [
+                {
+                  "role": "user", 
+                  "content": "'"$ERROR_LOG"'"
+                }
+              ]
             }')
           
-          ANALYSIS=$(echo "$CLAUDE_RESPONSE" | jq -r '.completion')
+          ANALYSIS=$(echo "$CLAUDE_RESPONSE" | jq -r '.content[0].text')
           echo "Claude Analysis:"
           echo "$ANALYSIS"
       
@@ -50,6 +59,9 @@ jobs:
         run: |
           SYSTEM_PROMPT="You are an AI DevOps assistant. Analyze CI/CD logs and explain errors clearly."
           USER_PROMPT="Build failed in GitHub Actions. Please analyze the error and provide suggestions to fix it."
+          
+          # Mengambil log error dari langkah sebelumnya
+          ERROR_LOG=$(cat $GITHUB_STEP_SUMMARY)
           
           CHATGPT_RESPONSE=$(curl -s -X POST https://api.openai.com/v1/chat/completions \
             -H "Authorization: Bearer $OPENAI_API_KEY" \
@@ -63,7 +75,7 @@ jobs:
                 },
                 {
                   "role": "user", 
-                  "content": "'"$USER_PROMPT"'"
+                  "content": "'"$ERROR_LOG"'"
                 }
               ],
               "max_tokens": 1000,
