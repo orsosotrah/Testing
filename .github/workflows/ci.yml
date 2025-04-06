@@ -176,7 +176,7 @@ jobs:
           # Create request
           cat > request.json << 'EOF'
           {
-            "model": "gpt-4o-mini-2024-07-18",
+            "model": "gpt-4o-mini",
             "messages": [
               {
                 "role": "system",
