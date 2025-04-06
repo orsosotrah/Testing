@@ -54,7 +54,7 @@ jobs:
           }
           EOF
           
-          # Call Claude API using messages endpoint
+          # Call Claude API
           CLAUDE_RESPONSE=$(curl -s -X POST https://api.anthropic.com/v1/messages \
             -H "x-api-key: $ANTHROPIC_API_KEY" \
             -H "anthropic-version: 2023-06-01" \
