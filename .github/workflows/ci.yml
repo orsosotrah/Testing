@@ -1,5 +1,5 @@
-# .github/workflows/ci.yml
-name: build-and-test
+# .github/workflows/ci-ultra-minimal.yml
+name: build-and-test-minimal
 on:
   push:
     branches: ["main"]
@@ -8,188 +8,116 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    env:
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      OPENAI_ASSISTANT_ID: ${{ secrets.OPENAI_ASSISTANT_ID }}
     steps:
       - uses: actions/checkout@v3
       
-      # Create logs directory at the beginning of the workflow
-      - name: Create logs directory
-        run: mkdir -p logs
-        
       - name: Setup .NET
         uses: actions/setup-dotnet@v3
         with:
           dotnet-version: 8.0.x
+      
       - name: Restore dependencies
         run: dotnet restore
+      
       - name: Build
         run: dotnet build --no-restore
-      - name: Test
-        run: |
-          # Run tests and capture output
-          dotnet test --no-build --verbosity normal | tee logs/test_output.log
-          TEST_EXIT_CODE=${PIPESTATUS[0]}
-          # Add explicit information about test failures
-          if [ $TEST_EXIT_CODE -ne 0 ]; then
-            echo "Tests failed with exit code $TEST_EXIT_CODE" | tee -a logs/test_output.log
-            exit $TEST_EXIT_CODE
-          fi
       
-      - name: Analyze failure with GPT
+      - name: Test
+        run: dotnet test --no-build --verbosity normal
+      
+      - name: Analyze failure with AI
         if: failure()
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          # Ensure logs directory exists again (in case the job was restarted)
-          mkdir -p logs
+          echo "Collecting build information..."
           
-          echo "Running GPT analysis..."
-          # Create gpt_input.txt file with basic information
-          echo "### CI Logs" > logs/gpt_input.txt
-          echo "Build failed in GitHub Actions" >> logs/gpt_input.txt
+          # Capture error context directly into a variable
+          ERROR_CONTEXT="### CI Build Failure\n"
+          ERROR_CONTEXT+="Repository: $GITHUB_REPOSITORY\n"
+          ERROR_CONTEXT+="Workflow: $GITHUB_WORKFLOW\n"
+          ERROR_CONTEXT+="Branch: $GITHUB_REF\n\n"
           
-          # Check if test_output.log exists and has content
-          if [ -f logs/test_output.log ] && [ -s logs/test_output.log ]; then
-            echo "Found test_output.log, adding content to analysis" | tee -a logs/gpt_input.txt
-            echo "--- Test Output Log Content ---" >> logs/gpt_input.txt
-            tail -n 1000 logs/test_output.log >> logs/gpt_input.txt
-          else
-            echo "Error: test_output.log file not found or empty" | tee -a logs/gpt_input.txt
-            # Try to find any useful information from the workflow
-            echo "--- Attempting to gather build information ---" >> logs/gpt_input.txt
-            find . -name "*.binlog" -o -name "*.log" | xargs ls -la >> logs/gpt_input.txt 2>/dev/null || echo "No log files found"
-            echo "Current directory content:" >> logs/gpt_input.txt
-            ls -la >> logs/gpt_input.txt
-            ls -la logs >> logs/gpt_input.txt 2>/dev/null || echo "logs directory not found"
-          fi
-          
-          # Create thread
-          THREAD_RESPONSE=$(curl -s -X POST https://api.openai.com/v1/threads \
-            -H "Authorization: Bearer $OPENAI_API_KEY" \
-            -H "OpenAI-Beta: assistants=v2" \
-            -H "Content-Type: application/json" \
-            -d '{}')
-          
-          if [ -z "$THREAD_RESPONSE" ]; then
-            echo "Error: Empty response from OpenAI when creating thread"
-            exit 1
-          fi
-          
-          THREAD_ID=$(echo $THREAD_RESPONSE | jq -r '.id')
-          
-          if [ -z "$THREAD_ID" ] || [ "$THREAD_ID" = "null" ]; then
-            echo "Error: Failed to get thread ID from response"
-            echo "Response: $THREAD_RESPONSE"
-            exit 1
-          fi
-          
-          # Add message to thread
-          MESSAGE_RESPONSE=$(curl -s -X POST https://api.openai.com/v1/threads/$THREAD_ID/messages \
-            -H "Authorization: Bearer $OPENAI_API_KEY" \
-            -H "OpenAI-Beta: assistants=v2" \
-            -H "Content-Type: application/json" \
-            -d "{\"role\": \"user\", \"content\": $(cat logs/gpt_input.txt | jq -Rs .)}")
-          
-          # Create run
-          RUN_RESPONSE=$(curl -s -X POST https://api.openai.com/v1/threads/$THREAD_ID/runs \
-            -H "Authorization: Bearer $OPENAI_API_KEY" \
-            -H "OpenAI-Beta: assistants=v2" \
-            -H "Content-Type: application/json" \
-            -d '{
-              "assistant_id": "'$OPENAI_ASSISTANT_ID'", 
-              "instructions": "Kamu adalah asisten AI DevOps. Kamu membantu menganalisis log CI/CD dari GitHub Actions dan menjelaskan kesalahan dengan jelas. Kamu juga menyarankan apa yang mungkin salah dan bagaimana cara memperbaikinya.", 
-              "tools": [{"type": "code_interpreter"}]
-            }')
-          
-          if [ -z "$RUN_RESPONSE" ]; then
-            echo "Error: Empty response from OpenAI when creating run"
-            exit 1
-          fi
-          
-          RUN_ID=$(echo $RUN_RESPONSE | jq -r '.id')
-          
-          if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
-            echo "Error: Failed to get run ID from response"
-            echo "Response: $RUN_RESPONSE"
-            exit 1
-          fi
-          
-          echo "Waiting for GPT run to complete..."
-          
-          # Add timeout to prevent infinite loop
-          TIMEOUT=300  # 5 minutes
-          START_TIME=$(date +%s)
-          
-          while true; do
-            CURRENT_TIME=$(date +%s)
-            ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
-            
-            if [ $ELAPSED_TIME -gt $TIMEOUT ]; then
-              echo "Timeout waiting for GPT run to complete after $TIMEOUT seconds"
-              break
+          # Find and include relevant files with errors
+          ERROR_CONTEXT+="### Source Files with Potential Errors\n"
+          for file in $(find . -name "*.cs" -type f -exec grep -l "error\|XXXX\|fail" {} \; 2>/dev/null || echo ""); do
+            if [ -n "$file" ]; then
+              ERROR_CONTEXT+="File: $file\n"
+              ERROR_CONTEXT+="$(cat $file)\n\n"
             fi
-            
-            STATUS_RESPONSE=$(curl -s -X GET https://api.openai.com/v1/threads/$THREAD_ID/runs/$RUN_ID \
-              -H "Authorization: Bearer $OPENAI_API_KEY" \
-              -H "OpenAI-Beta: assistants=v2")
-            
-            if [ -z "$STATUS_RESPONSE" ]; then
-              echo "Error: Empty response when checking run status"
-              sleep 5
-              continue
-            fi
-            
-            STATUS=$(echo $STATUS_RESPONSE | jq -r '.status')
-            
-            if [ -z "$STATUS" ] || [ "$STATUS" = "null" ]; then
-              echo "Error: Failed to get status from response"
-              echo "Response: $STATUS_RESPONSE"
-              sleep 5
-              continue
-            fi
-            
-            echo "Current status: $STATUS"
-            
-            if [ "$STATUS" = "completed" ]; then
-              break
-            elif [ "$STATUS" = "failed" ] || [ "$STATUS" = "cancelled" ] || [ "$STATUS" = "expired" ]; then
-              echo "GPT run $STATUS"
-              break
-            fi
-            
-            sleep 5
           done
           
-          if [ "$STATUS" = "completed" ]; then
-            echo "Fetching GPT response..."
-            MESSAGES_RESPONSE=$(curl -s -X GET https://api.openai.com/v1/threads/$THREAD_ID/messages \
-              -H "Authorization: Bearer $OPENAI_API_KEY" \
-              -H "OpenAI-Beta: assistants=v2")
+          SYSTEM_PROMPT="You are an AI DevOps assistant. Analyze CI/CD logs from GitHub Actions and explain errors clearly and concisely. Suggest potential fixes."
+          
+          # Determine which AI to use based on available keys
+          if [ -n "$ANTHROPIC_API_KEY" ]; then
+            echo "Using Claude API for analysis..."
             
-            if [ -z "$MESSAGES_RESPONSE" ]; then
-              echo "Error: Empty response when fetching messages"
-              exit 1
-            fi
+            # Call Claude API with single call
+            CLAUDE_RESPONSE=$(curl -s -X POST https://api.anthropic.com/v1/messages \
+              -H "x-api-key: $ANTHROPIC_API_KEY" \
+              -H "anthropic-version: 2023-06-01" \
+              -H "content-type: application/json" \
+              -d '{
+                "model": "claude-3-haiku-20240307",
+                "max_tokens": 1000,
+                "system": "'"$SYSTEM_PROMPT"'",
+                "messages": [
+                  {
+                    "role": "user",
+                    "content": "'"${ERROR_CONTEXT//$'\n'/\\n}"'"
+                  }
+                ]
+              }')
             
-            ANALYSIS=$(echo $MESSAGES_RESPONSE | jq -r '.data[0].content[0].text.value')
+            # Extract and display analysis
+            ANALYSIS=$(echo "$CLAUDE_RESPONSE" | jq -r '.content[0].text' 2>/dev/null)
             
             if [ -z "$ANALYSIS" ] || [ "$ANALYSIS" = "null" ]; then
-              echo "Error: Failed to extract analysis from response"
-              echo "Response: $MESSAGES_RESPONSE"
-              exit 1
+              echo "❌ Error getting analysis from Claude API"
+              echo "$CLAUDE_RESPONSE" | jq '.'
+            else
+              echo "## 🤖 Claude Analysis"
+              echo "$ANALYSIS"
             fi
             
-            echo "GPT Analysis:"
-            echo "$ANALYSIS"
-            echo "$ANALYSIS" > logs/gpt_analysis.txt
+          elif [ -n "$OPENAI_API_KEY" ]; then
+            echo "Using OpenAI Chat Completions API for analysis..."
+            
+            # Call OpenAI Chat Completions API with single call
+            GPT_RESPONSE=$(curl -s -X POST https://api.openai.com/v1/chat/completions \
+              -H "Authorization: Bearer $OPENAI_API_KEY" \
+              -H "Content-Type: application/json" \
+              -d '{
+                "model": "gpt-4o",
+                "messages": [
+                  {
+                    "role": "system", 
+                    "content": "'"$SYSTEM_PROMPT"'"
+                  },
+                  {
+                    "role": "user",
+                    "content": "'"${ERROR_CONTEXT//$'\n'/\\n}"'"
+                  }
+                ],
+                "max_tokens": 1000
+              }')
+            
+            # Extract and display the analysis
+            ANALYSIS=$(echo "$GPT_RESPONSE" | jq -r '.choices[0].message.content' 2>/dev/null)
+            
+            if [ -z "$ANALYSIS" ] || [ "$ANALYSIS" = "null" ]; then
+              echo "❌ Error getting analysis from OpenAI API"
+              echo "$GPT_RESPONSE" | jq '.'
+            else
+              echo "## 🤖 ChatGPT Analysis"
+              echo "$ANALYSIS"
+            fi
+            
           else
-            echo "GPT run did not complete successfully. Status: $STATUS"
+            echo "Using fallback analysis (no AI API keys found)..."
+            echo "## ⚠️ Build Failure"
+            echo "The build process failed. Please check the logs above for specific error messages."
+            echo "To enable AI-powered error analysis, add either ANTHROPIC_API_KEY or OPENAI_API_KEY to your repository secrets."
           fi
-      
-      - name: Upload artifacts
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: gpt-analysis
-          path: logs/
-          if-no-files-found: warn
