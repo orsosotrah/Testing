@@ -22,32 +22,48 @@ jobs:
         with:
           dotnet-version: 8.0.x
       
-      # Save error logs if restore fails
+      # Save error logs if restore fails - improved error detection
       - name: Restore dependencies
         run: |
-          dotnet restore 2>&1 | tee logs/restore_output.log || {
-            echo "Restore dependencies failed with exit code $?" | tee -a logs/restore_output.log
+          dotnet restore > logs/restore_output.log 2>&1
+          RESTORE_EXIT=$?
+          cat logs/restore_output.log
+          if [ $RESTORE_EXIT -ne 0 ]; then
+            echo "Restore dependencies failed with exit code $RESTORE_EXIT" | tee -a logs/restore_output.log
             exit 1
-          }
+          fi
       
-      # Save error logs if build fails
+      # Save error logs if build fails - improved error detection
       - name: Build
         if: success()
         run: |
-          dotnet build --no-restore 2>&1 | tee logs/build_output.log || {
-            echo "Build failed with exit code $?" | tee -a logs/build_output.log
+          # Use --warnaserror to treat warnings as errors
+          dotnet build --no-restore --warnaserror > logs/build_output.log 2>&1
+          BUILD_EXIT=$?
+          cat logs/build_output.log
+          if [ $BUILD_EXIT -ne 0 ]; then
+            echo "Build failed with exit code $BUILD_EXIT" | tee -a logs/build_output.log
             exit 1
-          }
+          fi
       
-      # Save error logs if test fails
+      # Save error logs if test fails - improved error detection
       - name: Test
         if: success()
         run: |
-          # Run tests and capture output
-          dotnet test --no-build --verbosity normal 2>&1 | tee logs/test_output.log || {
-            echo "Tests failed with exit code $?" | tee -a logs/test_output.log
+          dotnet test --no-build --verbosity normal > logs/test_output.log 2>&1
+          TEST_EXIT=$?
+          cat logs/test_output.log
+          if [ $TEST_EXIT -ne 0 ]; then
+            echo "Tests failed with exit code $TEST_EXIT" | tee -a logs/test_output.log
             exit 1
-          }
+          fi
+      
+      # Manually add a force failure step for testing
+      - name: Force failure if TEST_FAILURE is true
+        if: ${{ github.event.inputs.TEST_FAILURE == 'true' }}
+        run: |
+          echo "Forcing build failure for testing purposes"
+          exit 1
       
       - name: Analyze failure with Claude
         if: failure()
@@ -90,6 +106,14 @@ jobs:
             echo "-- Basic Error Log --" >> logs/claude_input.txt
             cat logs/error_output.log >> logs/claude_input.txt
           fi
+          
+          # Show the source file with the error
+          echo "-- Source Files --" >> logs/claude_input.txt
+          find . -name "*.cs" -type f -exec grep -l "XXXX" {} \; | while read file; do
+            echo "File with potential error: $file" >> logs/claude_input.txt
+            echo "Content:" >> logs/claude_input.txt
+            cat "$file" >> logs/claude_input.txt
+          done
           
           # Also include GitHub Actions run info
           echo "-- GitHub Actions Context --" >> logs/claude_input.txt
