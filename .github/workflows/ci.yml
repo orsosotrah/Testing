@@ -123,6 +123,8 @@ jobs:
 
       - name: Analyze failure with Claude
         if: failure() && env.ANTHROPIC_API_KEY != ''
+        id: claude_analysis
+        continue-on-error: true
         run: |
           ERROR_CONTENT=$(cat error_log.txt)
           
@@ -148,22 +150,41 @@ jobs:
           }
           EOF
           
-          # Call Claude API
-          CLAUDE_RESPONSE=$(curl -s -X POST https://api.anthropic.com/v1/messages \
+          # Call Claude API with timeout and verbose output for debugging
+          CLAUDE_RESPONSE=$(curl -s -v --max-time 30 -X POST https://api.anthropic.com/v1/messages \
             -H "x-api-key: $ANTHROPIC_API_KEY" \
             -H "anthropic-version: 2023-06-01" \
             -H "content-type: application/json" \
-            -d @request.json)
+            -d @request.json 2>claude_request.log)
+            
+          # Save request JSON and response for debugging
+          echo "Request sent to Claude:" > claude_debug.log
+          cat request.json >> claude_debug.log
+          echo -e "\n\nResponse headers:" >> claude_debug.log
+          cat claude_request.log >> claude_debug.log
+          echo -e "\n\nResponse body:" >> claude_debug.log
+          echo "$CLAUDE_RESPONSE" >> claude_debug.log
           
-          # Extract response text
+          # Extract response text and capture any errors
           echo "Claude Analysis:"
-          echo "$CLAUDE_RESPONSE" | jq -r '.content[0].text // "Analysis not available"'
-          
-          # Save the analysis to a file for review
-          echo "$CLAUDE_RESPONSE" | jq -r '.content[0].text // "Analysis not available"' > claude_analysis.txt
+          if [[ -z "$CLAUDE_RESPONSE" ]]; then
+            ERROR_MSG="Analysis not available: (Empty API response - API connection failed)"
+            echo "$ERROR_MSG"
+            echo "$ERROR_MSG" > claude_analysis.txt
+          elif echo "$CLAUDE_RESPONSE" | jq -e '.error' > /dev/null; then
+            ERROR_TYPE=$(echo "$CLAUDE_RESPONSE" | jq -r '.error.type // "unknown_error"')
+            ERROR_MESSAGE=$(echo "$CLAUDE_RESPONSE" | jq -r '.error.message // "No message"')
+            ERROR_MSG="Analysis not available: (API Error: $ERROR_TYPE - $ERROR_MESSAGE)"
+            echo "$ERROR_MSG"
+            echo "$ERROR_MSG" > claude_analysis.txt
+          else
+            echo "$CLAUDE_RESPONSE" | jq -r '.content[0].text // "Analysis not available: (Response format error - no content found)"' | tee claude_analysis.txt
+          fi
       
       - name: Analyze failure with ChatGPT
         if: failure() && env.OPENAI_API_KEY != '' 
+        id: chatgpt_analysis
+        continue-on-error: true
         run: |
           ERROR_CONTENT=$(cat error_log.txt)
           
@@ -193,27 +214,50 @@ jobs:
           }
           EOF
           
-          # Call OpenAI API
-          CHATGPT_RESPONSE=$(curl -s -X POST https://api.openai.com/v1/chat/completions \
+          # Call OpenAI API with timeout and verbose output for debugging
+          CHATGPT_RESPONSE=$(curl -s -v --max-time 30 -X POST https://api.openai.com/v1/chat/completions \
             -H "Authorization: Bearer $OPENAI_API_KEY" \
             -H "Content-Type: application/json" \
-            -d @request.json)
+            -d @request.json 2>chatgpt_request.log)
+            
+          # Save request JSON and response for debugging
+          echo "Request sent to ChatGPT:" > chatgpt_debug.log
+          cat request.json >> chatgpt_debug.log
+          echo -e "\n\nResponse headers:" >> chatgpt_debug.log
+          cat chatgpt_request.log >> chatgpt_debug.log
+          echo -e "\n\nResponse body:" >> chatgpt_debug.log
+          echo "$CHATGPT_RESPONSE" >> chatgpt_debug.log
           
-          # Extract response text
+          # Extract response text and capture any errors
           echo "ChatGPT Analysis:"
-          echo "$CHATGPT_RESPONSE" | jq -r '.choices[0].message.content // "Analysis not available"'
-          
-          # Save the analysis to a file for review
-          echo "$CHATGPT_RESPONSE" | jq -r '.choices[0].message.content // "Analysis not available"' > chatgpt_analysis.txt
+          if [[ -z "$CHATGPT_RESPONSE" ]]; then
+            ERROR_MSG="Analysis not available: (Empty API response - API connection failed)"
+            echo "$ERROR_MSG"
+            echo "$ERROR_MSG" > chatgpt_analysis.txt
+          elif echo "$CHATGPT_RESPONSE" | jq -e '.error' > /dev/null; then
+            ERROR_TYPE=$(echo "$CHATGPT_RESPONSE" | jq -r '.error.type // "unknown_error"')
+            ERROR_MESSAGE=$(echo "$CHATGPT_RESPONSE" | jq -r '.error.message // "No message"')
+            ERROR_MSG="Analysis not available: (API Error: $ERROR_TYPE - $ERROR_MESSAGE)"
+            echo "$ERROR_MSG"
+            echo "$ERROR_MSG" > chatgpt_analysis.txt
+          else
+            echo "$CHATGPT_RESPONSE" | jq -r '.choices[0].message.content // "Analysis not available: (Response format error - no content found)"' | tee chatgpt_analysis.txt
+          fi
       
       - name: Upload error logs as artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v3
         with:
           name: error-logs
           path: |
             error_log.txt
             claude_analysis.txt
             chatgpt_analysis.txt
+            claude_debug.log
+            chatgpt_debug.log
+            claude_request.log
+            chatgpt_request.log
             build.log
+            project_files.txt
             **/*.trx
+          if-no-files-found: warn
