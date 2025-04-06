@@ -54,12 +54,45 @@ jobs:
           if [ -s project_files.txt ]; then
             PROJECT_FILE=$(head -n 1 project_files.txt)
             echo "Membangun project: $PROJECT_FILE"
-            dotnet build "$PROJECT_FILE" --no-restore -v d > build.log 2>&1 || (cat build.log && exit 1)
+            # Gunakan level verbose minimal dan redirect semua output ke file
+            dotnet build "$PROJECT_FILE" --no-restore -v m > build_full.log 2>&1
+            BUILD_EXIT_CODE=$?
+            # Jika build gagal, tangkap error dengan lebih fokus
+            if [ $BUILD_EXIT_CODE -ne 0 ]; then
+              # Potong output yang terlalu panjang, fokus pada error saja
+              echo "Build gagal, mencari error..." 
+              grep -A 10 -B 3 "error CS" build_full.log > build.log 2>/dev/null || true
+              grep -A 5 -B 2 "Build FAILED" build_full.log >> build.log 2>/dev/null || true
+              # Tambahkan ringkasan error
+              echo -e "\n\n--- RINGKASAN ERROR ---" >> build.log
+              grep -E "(error|Error|ERROR) [A-Z0-9]+" build_full.log | head -n 10 >> build.log
+              # Tentukan jumlah error
+              ERROR_COUNT=$(grep -c -E "(error|Error|ERROR) [A-Z0-9]+" build_full.log)
+              echo -e "\nDitemukan total $ERROR_COUNT error dalam build." >> build.log
+              cat build.log
+              exit 1
+            fi
           else
             # Coba build di direktori saat ini
             if ls *.sln 1> /dev/null 2>&1 || ls *.csproj 1> /dev/null 2>&1; then
               echo "Membangun project di direktori saat ini"
-              dotnet build --no-restore -v d > build.log 2>&1 || (cat build.log && exit 1)
+              dotnet build --no-restore -v m > build_full.log 2>&1
+              BUILD_EXIT_CODE=$?
+              # Jika build gagal, tangkap error dengan lebih fokus
+              if [ $BUILD_EXIT_CODE -ne 0 ]; then
+                # Potong output yang terlalu panjang, fokus pada error saja
+                echo "Build gagal, mencari error..."
+                grep -A 10 -B 3 "error CS" build_full.log > build.log 2>/dev/null || true
+                grep -A 5 -B 2 "Build FAILED" build_full.log >> build.log 2>/dev/null || true
+                # Tambahkan ringkasan error
+                echo -e "\n\n--- RINGKASAN ERROR ---" >> build.log
+                grep -E "(error|Error|ERROR) [A-Z0-9]+" build_full.log | head -n 10 >> build.log
+                # Tentukan jumlah error
+                ERROR_COUNT=$(grep -c -E "(error|Error|ERROR) [A-Z0-9]+" build_full.log)
+                echo -e "\nDitemukan total $ERROR_COUNT error dalam build." >> build.log
+                cat build.log
+                exit 1
+              fi
             else
               echo "KESALAHAN: Tidak dapat menemukan file untuk build" | tee build.log
               exit 1
@@ -93,15 +126,41 @@ jobs:
           
           # Tambahkan informasi repository
           echo "## Repository Information" >> error_log.txt
-          echo "Repository structure:" >> error_log.txt
-          find . -type f -not -path "*/\.*" | sort >> error_log.txt
+          echo "Working directory: $(pwd)" >> error_log.txt
+          echo "Project Structure (hanya .cs, .csproj, .sln files):" >> error_log.txt
+          find . -name "*.cs" -o -name "*.csproj" -o -name "*.sln" | sort >> error_log.txt
+          
+          # Cari dan tambahkan error C# spesifik (syntax errors)
+          if [ -f build.log ]; then
+            # File error log ringkas sudah ada (dibuat oleh step Build)
+            cat build.log >> error_log.txt
+          elif [ -f build_full.log ]; then
+            # Jika hanya ada log lengkap, filter untuk mendapatkan error penting saja
+            echo "## Compilation Errors" >> error_log.txt
+            grep -A 5 -B 2 "error CS" build_full.log >> error_log.txt 2>/dev/null || echo "No CS errors found" >> error_log.txt
+            echo "## Build Status" >> error_log.txt
+            grep -A 3 -B 1 "Build FAILED" build_full.log >> error_log.txt 2>/dev/null || echo "Build status not found" >> error_log.txt
+          fi
           
           # Tangkap error MSB1003 jika ada
-          if grep -q "MSB1003" build.log 2>/dev/null; then
+          if grep -q "MSB1003" build_full.log 2>/dev/null || grep -q "MSB1003" build.log 2>/dev/null; then
             echo "## MSB1003 Error Detected" >> error_log.txt
             echo "Error: Tidak dapat menemukan project atau solution file." >> error_log.txt
             echo "Working directory: $(pwd)" >> error_log.txt
           fi
+          
+          # Cek file C# yang memiliki masalah syntax
+          echo "## C# File Check" >> error_log.txt
+          for cs_file in $(find . -name "*.cs"); do
+            # Cari error yang terkait dengan file ini
+            if [ -f build_full.log ] && grep -q "$cs_file" build_full.log; then
+              echo -e "\nPotensi error dalam file: $cs_file" >> error_log.txt
+              head -n 20 "$cs_file" >> error_log.txt
+              echo "..." >> error_log.txt
+            fi
+          done
+          
+          echo '```' >> error_log.txt
           
           # Capture more comprehensive error information
           echo "## Build Log" >> error_log.txt
@@ -133,7 +192,7 @@ jobs:
           {
             "model": "claude-3-haiku-20240307",
             "max_tokens": 1000,
-            "system": "Kamu adalah asisten AI DevOps. Analisis log CI/CD dan jelaskan kesalahan dengan jelas. Tampilkan ulang pesan kesalahannya.",
+            "system": "Kamu adalah asisten AI DevOps. Analisis log CI/CD dan jelaskan kesalahan dengan jelas. Fokus pada error CS utama dan kesalahan syntax. Jelaskan secara ringkas apa yang salah dan cara memperbaikinya. Jangan sertakan kode boilerplate atau informasi sistem yang tidak relevan dengan error utama.",
             "messages": [
               {
                 "role": "user",
@@ -195,7 +254,7 @@ jobs:
             "messages": [
               {
                 "role": "system",
-                "content": "Kamu adalah asisten AI DevOps. Analisis log CI/CD dan jelaskan kesalahan dengan jelas. Tampilkan ulang pesan kesalahannya."
+                "content": "Kamu adalah asisten AI DevOps. Analisis log CI/CD dan jelaskan kesalahan dengan jelas. Fokus pada error CS utama dan kesalahan syntax. Jelaskan secara ringkas apa yang salah dan cara memperbaikinya. Jangan sertakan kode boilerplate atau informasi sistem yang tidak relevan dengan error utama."
               },
               {
                 "role": "user",
@@ -258,6 +317,7 @@ jobs:
             claude_request.log
             chatgpt_request.log
             build.log
+            build_full.log
             project_files.txt
             **/*.trx
           if-no-files-found: warn
