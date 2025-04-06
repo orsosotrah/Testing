@@ -21,17 +21,34 @@ jobs:
       - name: Restore dependencies
         run: dotnet restore
       - name: Build
-        run: dotnet build --no-restore
+        run: dotnet build --no-restore -v d > build.log 2>&1 || (cat build.log && exit 1)
       - name: Test
-        run: dotnet test --no-build --verbosity normal
+        run: dotnet test --no-build --verbosity normal --logger "trx" || true
 
       - name: Create error log file
         if: failure()
         run: |
+          mkdir -p logs
           echo "## Build Failure Log" > error_log.txt
           echo "Error occurred during the build process." >> error_log.txt
           echo '```' >> error_log.txt
-          cat $GITHUB_STEP_SUMMARY 2>/dev/null >> error_log.txt
+          
+          # Capture more comprehensive error information
+          echo "## Build Log" >> error_log.txt
+          cat build.log 2>/dev/null >> error_log.txt || echo "No build.log available"
+          
+          # Capture test results if available
+          echo "## Test Results" >> error_log.txt
+          find . -name "*.trx" -exec cat {} \; 2>/dev/null >> error_log.txt || echo "No test results available"
+          
+          # Include GitHub step summary if available
+          echo "## GitHub Step Summary" >> error_log.txt
+          cat $GITHUB_STEP_SUMMARY 2>/dev/null >> error_log.txt || echo "No step summary available"
+          
+          # Include environment information
+          echo "## Environment Information" >> error_log.txt
+          dotnet --info >> error_log.txt
+          
           echo '```' >> error_log.txt
 
       - name: Analyze failure with Claude
@@ -40,7 +57,7 @@ jobs:
           ERROR_CONTENT=$(cat error_log.txt)
           
           # Save JSON to file to avoid escaping issues
-          cat > request.json << EOF
+          cat > request.json << 'EOF'
           {
             "model": "claude-3-haiku-20240307",
             "max_tokens": 1000,
@@ -48,7 +65,14 @@ jobs:
             "messages": [
               {
                 "role": "user",
-                "content": "$ERROR_CONTENT"
+                "content": 
+          EOF
+          
+          # Append error content to JSON file - use jq for proper escaping
+          echo "$ERROR_CONTENT" | jq -Rs '.' >> request.json
+          
+          # Close the JSON structure
+          cat >> request.json << 'EOF'
               }
             ]
           }
@@ -64,14 +88,17 @@ jobs:
           # Extract response text
           echo "Claude Analysis:"
           echo "$CLAUDE_RESPONSE" | jq -r '.content[0].text // "Analysis not available"'
+          
+          # Save the analysis to a file for review
+          echo "$CLAUDE_RESPONSE" | jq -r '.content[0].text // "Analysis not available"' > claude_analysis.txt
       
       - name: Analyze failure with ChatGPT
-        if: failure() && env.OPENAI_API_KEY != '' #&& env.ANTHROPIC_API_KEY == ''  
+        if: failure() && env.OPENAI_API_KEY != '' 
         run: |
           ERROR_CONTENT=$(cat error_log.txt)
           
           # Save JSON to file to avoid escaping issues
-          cat > request.json << EOF
+          cat > request.json << 'EOF'
           {
             "model": "gpt-3.5-turbo",
             "messages": [
@@ -81,7 +108,14 @@ jobs:
               },
               {
                 "role": "user",
-                "content": "$ERROR_CONTENT"
+                "content": 
+          EOF
+          
+          # Append error content to JSON file - use jq for proper escaping
+          echo "$ERROR_CONTENT" | jq -Rs '.' >> request.json
+          
+          # Close the JSON structure
+          cat >> request.json << 'EOF'
               }
             ],
             "max_tokens": 1000,
@@ -98,3 +132,18 @@ jobs:
           # Extract response text
           echo "ChatGPT Analysis:"
           echo "$CHATGPT_RESPONSE" | jq -r '.choices[0].message.content // "Analysis not available"'
+          
+          # Save the analysis to a file for review
+          echo "$CHATGPT_RESPONSE" | jq -r '.choices[0].message.content // "Analysis not available"' > chatgpt_analysis.txt
+      
+      - name: Upload error logs as artifacts
+        if: failure()
+        uses: actions/upload-artifact@v3
+        with:
+          name: error-logs
+          path: |
+            error_log.txt
+            claude_analysis.txt
+            chatgpt_analysis.txt
+            build.log
+            **/*.trx
