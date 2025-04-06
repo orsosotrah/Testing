@@ -9,7 +9,8 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_ASSISTANT_ID: ${{ secrets.OPENAI_ASSISTANT_ID }}
     steps:
       - uses: actions/checkout@v3
       
@@ -21,162 +22,174 @@ jobs:
         uses: actions/setup-dotnet@v3
         with:
           dotnet-version: 8.0.x
-      
-      # Improved restore dependencies step with debugging
       - name: Restore dependencies
-        run: |
-          echo "Starting dotnet restore..."
-          echo "Current directory: $(pwd)"
-          echo "Project files available:"
-          find . -name "*.csproj" -o -name "*.sln"
-          
-          # Run restore with verbose output
-          dotnet restore --verbosity detailed > logs/restore_output.log 2>&1
-          RESTORE_EXIT=$?
-          
-          # Display the log content
-          echo "Restore log content:"
-          cat logs/restore_output.log
-          
-          # Exit with the same code as restore
-          if [ $RESTORE_EXIT -ne 0 ]; then
-            echo "Restore dependencies failed with exit code $RESTORE_EXIT"
-            exit $RESTORE_EXIT
-          fi
-      
-      # Build step 
+        run: dotnet restore
       - name: Build
-        if: success()
-        run: |
-          dotnet build --no-restore --warnaserror > logs/build_output.log 2>&1
-          BUILD_EXIT=$?
-          cat logs/build_output.log
-          if [ $BUILD_EXIT -ne 0 ]; then
-            echo "Build failed with exit code $BUILD_EXIT"
-            exit $BUILD_EXIT
-          fi
-      
-      # Test step
+        run: dotnet build --no-restore
       - name: Test
-        if: success()
         run: |
-          dotnet test --no-build --verbosity normal > logs/test_output.log 2>&1
-          TEST_EXIT=$?
-          cat logs/test_output.log
-          if [ $TEST_EXIT -ne 0 ]; then
-            echo "Tests failed with exit code $TEST_EXIT"
-            exit $TEST_EXIT
+          # Run tests and capture output
+          dotnet test --no-build --verbosity normal | tee logs/test_output.log
+          TEST_EXIT_CODE=${PIPESTATUS[0]}
+          # Add explicit information about test failures
+          if [ $TEST_EXIT_CODE -ne 0 ]; then
+            echo "Tests failed with exit code $TEST_EXIT_CODE" | tee -a logs/test_output.log
+            exit $TEST_EXIT_CODE
           fi
       
-      # Manual failure step for testing
-      - name: Force failure if TEST_FAILURE is true
-        if: ${{ github.event.inputs.TEST_FAILURE == 'true' }}
-        run: |
-          echo "Forcing build failure for testing purposes"
-          exit 1
-      
-      - name: Analyze failure with Claude
+      - name: Analyze failure with GPT
         if: failure()
         run: |
-          # Ensure logs directory exists again
+          # Ensure logs directory exists again (in case the job was restarted)
           mkdir -p logs
           
-          echo "Running Claude analysis..."
-          # Create input file with basic information
-          echo "### CI Logs" > logs/claude_input.txt
-          echo "Build failed in GitHub Actions" >> logs/claude_input.txt
+          echo "Running GPT analysis..."
+          # Create gpt_input.txt file with basic information
+          echo "### CI Logs" > logs/gpt_input.txt
+          echo "Build failed in GitHub Actions" >> logs/gpt_input.txt
           
-          # Check for errors in each stage of the pipeline
-          echo "--- Build Pipeline Logs ---" >> logs/claude_input.txt
-          
-          if [ -f logs/restore_output.log ] && [ -s logs/restore_output.log ]; then
-            echo "-- Restore Dependencies Log --" >> logs/claude_input.txt
-            cat logs/restore_output.log >> logs/claude_input.txt
-          fi
-          
-          if [ -f logs/build_output.log ] && [ -s logs/build_output.log ]; then
-            echo "-- Build Log --" >> logs/claude_input.txt
-            cat logs/build_output.log >> logs/claude_input.txt
-          fi
-          
+          # Check if test_output.log exists and has content
           if [ -f logs/test_output.log ] && [ -s logs/test_output.log ]; then
-            echo "-- Test Log --" >> logs/claude_input.txt
-            cat logs/test_output.log >> logs/claude_input.txt
+            echo "Found test_output.log, adding content to analysis" | tee -a logs/gpt_input.txt
+            echo "--- Test Output Log Content ---" >> logs/gpt_input.txt
+            tail -n 1000 logs/test_output.log >> logs/gpt_input.txt
+          else
+            echo "Error: test_output.log file not found or empty" | tee -a logs/gpt_input.txt
+            # Try to find any useful information from the workflow
+            echo "--- Attempting to gather build information ---" >> logs/gpt_input.txt
+            find . -name "*.binlog" -o -name "*.log" | xargs ls -la >> logs/gpt_input.txt 2>/dev/null || echo "No log files found"
+            echo "Current directory content:" >> logs/gpt_input.txt
+            ls -la >> logs/gpt_input.txt
+            ls -la logs >> logs/gpt_input.txt 2>/dev/null || echo "logs directory not found"
           fi
           
-          # Show the source file with the error
-          echo "-- Source Files --" >> logs/claude_input.txt
-          find . -name "*.cs" -type f -exec grep -l "XXXX" {} \; | while read file; do
-            echo "File with potential error: $file" >> logs/claude_input.txt
-            echo "Content:" >> logs/claude_input.txt
-            cat "$file" >> logs/claude_input.txt
+          # Create thread
+          THREAD_RESPONSE=$(curl -s -X POST https://api.openai.com/v1/threads \
+            -H "Authorization: Bearer $OPENAI_API_KEY" \
+            -H "OpenAI-Beta: assistants=v2" \
+            -H "Content-Type: application/json" \
+            -d '{}')
+          
+          if [ -z "$THREAD_RESPONSE" ]; then
+            echo "Error: Empty response from OpenAI when creating thread"
+            exit 1
+          fi
+          
+          THREAD_ID=$(echo $THREAD_RESPONSE | jq -r '.id')
+          
+          if [ -z "$THREAD_ID" ] || [ "$THREAD_ID" = "null" ]; then
+            echo "Error: Failed to get thread ID from response"
+            echo "Response: $THREAD_RESPONSE"
+            exit 1
+          fi
+          
+          # Add message to thread
+          MESSAGE_RESPONSE=$(curl -s -X POST https://api.openai.com/v1/threads/$THREAD_ID/messages \
+            -H "Authorization: Bearer $OPENAI_API_KEY" \
+            -H "OpenAI-Beta: assistants=v2" \
+            -H "Content-Type: application/json" \
+            -d "{\"role\": \"user\", \"content\": $(cat logs/gpt_input.txt | jq -Rs .)}")
+          
+          # Create run
+          RUN_RESPONSE=$(curl -s -X POST https://api.openai.com/v1/threads/$THREAD_ID/runs \
+            -H "Authorization: Bearer $OPENAI_API_KEY" \
+            -H "OpenAI-Beta: assistants=v2" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "assistant_id": "'$OPENAI_ASSISTANT_ID'", 
+              "instructions": "Kamu adalah asisten AI DevOps. Kamu membantu menganalisis log CI/CD dari GitHub Actions dan menjelaskan kesalahan dengan jelas. Kamu juga menyarankan apa yang mungkin salah dan bagaimana cara memperbaikinya.", 
+              "tools": [{"type": "code_interpreter"}]
+            }')
+          
+          if [ -z "$RUN_RESPONSE" ]; then
+            echo "Error: Empty response from OpenAI when creating run"
+            exit 1
+          fi
+          
+          RUN_ID=$(echo $RUN_RESPONSE | jq -r '.id')
+          
+          if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+            echo "Error: Failed to get run ID from response"
+            echo "Response: $RUN_RESPONSE"
+            exit 1
+          fi
+          
+          echo "Waiting for GPT run to complete..."
+          
+          # Add timeout to prevent infinite loop
+          TIMEOUT=300  # 5 minutes
+          START_TIME=$(date +%s)
+          
+          while true; do
+            CURRENT_TIME=$(date +%s)
+            ELAPSED_TIME=$((CURRENT_TIME - START_TIME))
+            
+            if [ $ELAPSED_TIME -gt $TIMEOUT ]; then
+              echo "Timeout waiting for GPT run to complete after $TIMEOUT seconds"
+              break
+            fi
+            
+            STATUS_RESPONSE=$(curl -s -X GET https://api.openai.com/v1/threads/$THREAD_ID/runs/$RUN_ID \
+              -H "Authorization: Bearer $OPENAI_API_KEY" \
+              -H "OpenAI-Beta: assistants=v2")
+            
+            if [ -z "$STATUS_RESPONSE" ]; then
+              echo "Error: Empty response when checking run status"
+              sleep 5
+              continue
+            fi
+            
+            STATUS=$(echo $STATUS_RESPONSE | jq -r '.status')
+            
+            if [ -z "$STATUS" ] || [ "$STATUS" = "null" ]; then
+              echo "Error: Failed to get status from response"
+              echo "Response: $STATUS_RESPONSE"
+              sleep 5
+              continue
+            fi
+            
+            echo "Current status: $STATUS"
+            
+            if [ "$STATUS" = "completed" ]; then
+              break
+            elif [ "$STATUS" = "failed" ] || [ "$STATUS" = "cancelled" ] || [ "$STATUS" = "expired" ]; then
+              echo "GPT run $STATUS"
+              break
+            fi
+            
+            sleep 5
           done
           
-          # GitHub Actions context
-          echo "-- GitHub Actions Context --" >> logs/claude_input.txt
-          echo "Workflow: $GITHUB_WORKFLOW" >> logs/claude_input.txt
-          echo "Repository: $GITHUB_REPOSITORY" >> logs/claude_input.txt
-          echo "Ref: $GITHUB_REF" >> logs/claude_input.txt
-          
-          # Save input for debugging
-          echo "Claude input created, content saved for debugging:"
-          cat logs/claude_input.txt
-          
-          # System prompt
-          SYSTEM_PROMPT="You are an AI DevOps assistant. Analyze CI/CD logs and explain errors clearly."
-          USER_PROMPT=$(cat logs/claude_input.txt)
-          
-          # Save prompt to a temporary JSON file instead of inline JSON
-          echo '{
-            "model": "claude-3-haiku-20240307",
-            "max_tokens": 1000,
-            "system": "'"$SYSTEM_PROMPT"'",
-            "messages": [
-              {
-                "role": "user",
-                "content": '"$(echo "$USER_PROMPT" | jq -Rs)"'
-              }
-            ]
-          }' > logs/claude_request.json
-          
-          # Debug: display the generated JSON
-          echo "Claude API request:"
-          cat logs/claude_request.json
-          
-          # Make API call to Claude using the JSON file
-          CLAUDE_RESPONSE=$(curl -s -X POST https://api.anthropic.com/v1/messages \
-            -H "x-api-key: $ANTHROPIC_API_KEY" \
-            -H "anthropic-version: 2023-06-01" \
-            -H "content-type: application/json" \
-            -d @logs/claude_request.json)
-          
-          # Save full response for debugging
-          echo "$CLAUDE_RESPONSE" > logs/claude_response.json
-          
-          if [ -z "$CLAUDE_RESPONSE" ]; then
-            echo "Error: Empty response from Claude API"
-            exit 1
+          if [ "$STATUS" = "completed" ]; then
+            echo "Fetching GPT response..."
+            MESSAGES_RESPONSE=$(curl -s -X GET https://api.openai.com/v1/threads/$THREAD_ID/messages \
+              -H "Authorization: Bearer $OPENAI_API_KEY" \
+              -H "OpenAI-Beta: assistants=v2")
+            
+            if [ -z "$MESSAGES_RESPONSE" ]; then
+              echo "Error: Empty response when fetching messages"
+              exit 1
+            fi
+            
+            ANALYSIS=$(echo $MESSAGES_RESPONSE | jq -r '.data[0].content[0].text.value')
+            
+            if [ -z "$ANALYSIS" ] || [ "$ANALYSIS" = "null" ]; then
+              echo "Error: Failed to extract analysis from response"
+              echo "Response: $MESSAGES_RESPONSE"
+              exit 1
+            fi
+            
+            echo "GPT Analysis:"
+            echo "$ANALYSIS"
+            echo "$ANALYSIS" > logs/gpt_analysis.txt
+          else
+            echo "GPT run did not complete successfully. Status: $STATUS"
           fi
-          
-          # Extract the analysis - fixed jq syntax
-          echo "Extracting analysis from Claude response..."
-          ANALYSIS=$(echo "$CLAUDE_RESPONSE" | jq -r '.content[0].text')
-          
-          if [ -z "$ANALYSIS" ] || [ "$ANALYSIS" = "null" ]; then
-            echo "Error: Failed to extract analysis from response"
-            echo "Response structure:" 
-            echo "$CLAUDE_RESPONSE" | jq '.'
-            exit 1
-          fi
-          
-          echo "Claude Analysis:"
-          echo "$ANALYSIS"
-          echo "$ANALYSIS" > logs/claude_analysis.txt
       
       - name: Upload artifacts
-        if: always()
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: claude-analysis
+          name: gpt-analysis
           path: logs/
           if-no-files-found: warn
