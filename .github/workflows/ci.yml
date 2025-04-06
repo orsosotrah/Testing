@@ -124,7 +124,7 @@ jobs:
           {
             "model": "claude-3-haiku-20240307",
             "max_tokens": 1000,
-            "system": "Kamu adalah asisten AI DevOps. Analisis log CI/CD dan jelaskan kesalahan dengan jelas. Fokus pada error CS utama dan kesalahan syntax. Jelaskan secara ringkas apa yang salah dan cara memperbaikinya.",
+            "system": "Kamu adalah asisten AI DevOps. Analisis log CI/CD dan jelaskan secara ringkas apa yang salah dan cara memperbaikinya.",
             "messages": [
               {
                 "role": "user",
@@ -180,7 +180,7 @@ jobs:
             "messages": [
               {
                 "role": "system",
-                "content": "Kamu adalah asisten AI DevOps. Analisis log CI/CD dan jelaskan kesalahan dengan jelas. Fokus pada error CS utama dan kesalahan syntax. Jelaskan secara ringkas apa yang salah dan cara memperbaikinya."
+                "content": "Kamu adalah asisten AI DevOps. Analisis log CI/CD dan jelaskan secara ringkas apa yang salah dan cara memperbaikinya."
               },
               {
                 "role": "user",
