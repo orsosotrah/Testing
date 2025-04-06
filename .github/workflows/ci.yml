@@ -19,12 +19,13 @@ jobs:
         with:
           dotnet-version: 8.0.x
       
-      # Tambahkan langkah diagnosa untuk menemukan solution/project
+      # Find solution/project files
       - name: Find solution files
         run: |
           echo "Mencari solusi dan project files..."
-          find . -name "*.sln" -o -name "*.csproj" | tee project_files.txt
+          find . -name "*.sln" -o -name "*.csproj" > project_files.txt
           
+      # Restore dependencies
       - name: Restore dependencies
         run: |
           # Cek apakah ada file solution
@@ -43,249 +44,153 @@ jobs:
             dotnet restore "$PROJECT_FILE"
           else
             echo "KESALAHAN: Tidak dapat menemukan project atau solution file"
-            find . -type f | grep -v "/\.git/" > all_files.txt
-            echo "Semua file dalam repositori:"
-            cat all_files.txt
             exit 1
           fi
+      
+      # Build project
       - name: Build
         run: |
-          # Gunakan variabel PROJECT_FILE jika ada
+          # Pilih project file yang sesuai
           if [ -s project_files.txt ]; then
             PROJECT_FILE=$(head -n 1 project_files.txt)
             echo "Membangun project: $PROJECT_FILE"
-            # Gunakan level verbose minimal dan redirect semua output ke file
-            dotnet build "$PROJECT_FILE" --no-restore -v m > build_full.log 2>&1
-            BUILD_EXIT_CODE=$?
-            # Jika build gagal, tangkap error dengan lebih fokus
-            if [ $BUILD_EXIT_CODE -ne 0 ]; then
-              # Potong output yang terlalu panjang, fokus pada error saja
-              echo "Build gagal, mencari error..." 
-              grep -A 10 -B 3 "error CS" build_full.log > build.log 2>/dev/null || true
-              grep -A 5 -B 2 "Build FAILED" build_full.log >> build.log 2>/dev/null || true
-              # Tambahkan ringkasan error
-              echo -e "\n\n--- RINGKASAN ERROR ---" >> build.log
-              grep -E "(error|Error|ERROR) [A-Z0-9]+" build_full.log | head -n 10 >> build.log
-              # Tentukan jumlah error
-              ERROR_COUNT=$(grep -c -E "(error|Error|ERROR) [A-Z0-9]+" build_full.log)
-              echo -e "\nDitemukan total $ERROR_COUNT error dalam build." >> build.log
-              cat build.log
-              exit 1
-            fi
+            dotnet build "$PROJECT_FILE" --no-restore -v m > build_output.log 2>&1
           else
             # Coba build di direktori saat ini
             if ls *.sln 1> /dev/null 2>&1 || ls *.csproj 1> /dev/null 2>&1; then
               echo "Membangun project di direktori saat ini"
-              dotnet build --no-restore -v m > build_full.log 2>&1
-              BUILD_EXIT_CODE=$?
-              # Jika build gagal, tangkap error dengan lebih fokus
-              if [ $BUILD_EXIT_CODE -ne 0 ]; then
-                # Potong output yang terlalu panjang, fokus pada error saja
-                echo "Build gagal, mencari error..."
-                grep -A 10 -B 3 "error CS" build_full.log > build.log 2>/dev/null || true
-                grep -A 5 -B 2 "Build FAILED" build_full.log >> build.log 2>/dev/null || true
-                # Tambahkan ringkasan error
-                echo -e "\n\n--- RINGKASAN ERROR ---" >> build.log
-                grep -E "(error|Error|ERROR) [A-Z0-9]+" build_full.log | head -n 10 >> build.log
-                # Tentukan jumlah error
-                ERROR_COUNT=$(grep -c -E "(error|Error|ERROR) [A-Z0-9]+" build_full.log)
-                echo -e "\nDitemukan total $ERROR_COUNT error dalam build." >> build.log
-                cat build.log
-                exit 1
-              fi
+              dotnet build --no-restore -v m > build_output.log 2>&1
             else
-              echo "KESALAHAN: Tidak dapat menemukan file untuk build" | tee build.log
+              echo "KESALAHAN: Tidak dapat menemukan file untuk build" > build_output.log
               exit 1
             fi
           fi
           
+          # Check build result
+          if grep -q "Build succeeded" build_output.log; then
+            echo "Build berhasil"
+          else
+            echo "Build gagal"
+            exit 1
+          fi
+      
+      # Test project
       - name: Test
         run: |
-          # Gunakan variabel PROJECT_FILE jika ada
+          # Pilih project file yang sesuai
           if [ -s project_files.txt ]; then
             PROJECT_FILE=$(head -n 1 project_files.txt)
-            echo "Menjalankan test untuk: $PROJECT_FILE"
-            dotnet test "$PROJECT_FILE" --no-build --verbosity normal --logger "trx" || true
+            dotnet test "$PROJECT_FILE" --no-build --verbosity normal || true
           else
-            # Coba test di direktori saat ini
             if ls *.sln 1> /dev/null 2>&1 || ls *.csproj 1> /dev/null 2>&1; then
-              echo "Menjalankan test di direktori saat ini"
-              dotnet test --no-build --verbosity normal --logger "trx" || true
-            else
-              echo "KESALAHAN: Tidak dapat menemukan file untuk test"
+              dotnet test --no-build --verbosity normal || true
             fi
           fi
 
+      # Create minimal error log
       - name: Create error log file
         if: failure()
         run: |
-          mkdir -p logs
-          
-          # Buat file error log ringkas khusus untuk API
-          echo "## Build Failure Log" > error_api.txt
-          echo "Error occurred during the build process." >> error_api.txt
-          echo "" >> error_api.txt
-          
-          # Tambahkan error C# yang paling relevan
-          if [ -f build.log ]; then
-            # File error log ringkas sudah ada (dibuat oleh step Build)
-            grep -E "error CS[0-9]+|Build FAILED|Error\(s\)" build.log >> error_api.txt 2>/dev/null
-          elif [ -f build_full.log ]; then
-            # Jika hanya ada log lengkap, filter untuk mendapatkan error penting saja
-            grep -E "error CS[0-9]+|Build FAILED|Error\(s\)" build_full.log >> error_api.txt 2>/dev/null
-          fi
-          
-          # Cek file C# yang memiliki masalah syntax - HANYA untuk file yang error
-          for cs_file in $(find . -name "*.cs"); do
-            # Cari error yang terkait dengan file ini
-            if [ -f build_full.log ] && grep -q "$cs_file" build_full.log; then
-              echo -e "\n## Problematic Code" >> error_api.txt
-              echo "File: $cs_file" >> error_api.txt
-              head -n 20 "$cs_file" >> error_api.txt
-              echo "..." >> error_api.txt
-              break  # Hanya tampilkan file pertama yang bermasalah
-            fi
-          done
-          
-          # Membuat log lengkap untuk artifact
+          # Buat error log minimal
           echo "## Build Failure Log" > error_log.txt
           echo "Error occurred during the build process." >> error_log.txt
-          echo '```' >> error_log.txt
+          echo "" >> error_log.txt
           
-          # Tambahkan informasi repository
-          echo "## Repository Information" >> error_log.txt
-          echo "Working directory: $(pwd)" >> error_log.txt
-          echo "Project Structure (hanya .cs, .csproj, .sln files):" >> error_log.txt
-          find . -name "*.cs" -o -name "*.csproj" -o -name "*.sln" | sort >> error_log.txt
-          
-          # Cari dan tambahkan error C# spesifik (syntax errors)
-          if [ -f build.log ]; then
-            # File error log ringkas sudah ada (dibuat oleh step Build)
-            cat build.log >> error_log.txt
-          elif [ -f build_full.log ]; then
-            # Jika hanya ada log lengkap, filter untuk mendapatkan error penting saja
-            echo "## Compilation Errors" >> error_log.txt
-            grep -A 5 -B 2 "error CS" build_full.log >> error_log.txt 2>/dev/null || echo "No CS errors found" >> error_log.txt
-            echo "## Build Status" >> error_log.txt
-            grep -A 3 -B 1 "Build FAILED" build_full.log >> error_log.txt 2>/dev/null || echo "Build status not found" >> error_log.txt
+          # Extract C# errors
+          if [ -f build_output.log ]; then
+            # Tambahkan error CS dan status build
+            grep -E "error CS[0-9]+|Build FAILED|Error\(s\)" build_output.log >> error_log.txt 2>/dev/null || echo "No specific errors found" >> error_log.txt
+            
+            # Tambahkan kode bermasalah
+            for cs_file in $(grep -o "[^ ]*\.cs[^:]*" build_output.log | sort -u); do
+              if [ -f "$cs_file" ]; then
+                echo -e "\n## Problematic Code in $cs_file" >> error_log.txt
+                head -n 20 "$cs_file" >> error_log.txt
+                echo "..." >> error_log.txt
+                break  # Batasi hanya 1 file untuk menjaga log tetap minimal
+              fi
+            done
           fi
-          
-          # Cek file C# yang memiliki masalah syntax
-          echo "## C# File Check" >> error_log.txt
-          for cs_file in $(find . -name "*.cs"); do
-            # Cari error yang terkait dengan file ini
-            if [ -f build_full.log ] && grep -q "$cs_file" build_full.log; then
-              echo -e "\nPotensi error dalam file: $cs_file" >> error_log.txt
-              head -n 20 "$cs_file" >> error_log.txt
-              echo "..." >> error_log.txt
-            fi
-          done
-          
-          echo '```' >> error_log.txt
-          
-          # Capture more comprehensive error information
-          echo "## Build Log" >> error_log.txt
-          cat build.log 2>/dev/null >> error_log.txt || echo "No build.log available"
-          
-          # Capture test results if available
-          echo "## Test Results" >> error_log.txt
-          find . -name "*.trx" -exec cat {} \; 2>/dev/null >> error_log.txt || echo "No test results available"
-          
-          # Include GitHub step summary if available
-          echo "## GitHub Step Summary" >> error_log.txt
-          cat $GITHUB_STEP_SUMMARY 2>/dev/null >> error_log.txt || echo "No step summary available"
-          
-          # Include environment information
-          echo "## Environment Information" >> error_log.txt
-          dotnet --info >> error_log.txt
-          
-          echo '```' >> error_log.txt
 
+      # Analyze with Claude
       - name: Analyze failure with Claude
         if: failure() && env.ANTHROPIC_API_KEY != ''
-        id: claude_analysis
         continue-on-error: true
         run: |
-          ERROR_CONTENT=$(cat error_api.txt)
+          ERROR_CONTENT=$(cat error_log.txt)
           
-          # Save JSON to file to avoid escaping issues
+          # Create request
           cat > request.json << 'EOF'
           {
             "model": "claude-3-haiku-20240307",
             "max_tokens": 1000,
-            "system": "Kamu adalah asisten AI DevOps. Analisis log CI/CD dan jelaskan kesalahan dengan jelas. Fokus pada error CS utama dan kesalahan syntax. Jelaskan secara ringkas apa yang salah dan cara memperbaikinya. Jangan sertakan kode boilerplate atau informasi sistem yang tidak relevan dengan error utama.",
+            "system": "Kamu adalah asisten AI DevOps. Analisis log CI/CD dan jelaskan kesalahan dengan jelas. Fokus pada error CS utama dan kesalahan syntax. Jelaskan secara ringkas apa yang salah dan cara memperbaikinya.",
             "messages": [
               {
                 "role": "user",
                 "content": 
           EOF
           
-          # Append error content to JSON file - use jq for proper escaping
+          # Append error content
           echo "$ERROR_CONTENT" | jq -Rs '.' >> request.json
           
-          # Close the JSON structure
+          # Close JSON
           cat >> request.json << 'EOF'
               }
             ]
           }
           EOF
           
-          # Call Claude API with timeout and verbose output for debugging
+          # Call Claude API
           CLAUDE_RESPONSE=$(curl -s -v --max-time 30 -X POST https://api.anthropic.com/v1/messages \
             -H "x-api-key: $ANTHROPIC_API_KEY" \
             -H "anthropic-version: 2023-06-01" \
             -H "content-type: application/json" \
             -d @request.json 2>claude_request.log)
             
-          # Save request JSON and response for debugging
+          # Save request and response to debug log
           echo "Request sent to Claude:" > claude_debug.log
           cat request.json >> claude_debug.log
-          echo -e "\n\nResponse headers:" >> claude_debug.log
-          cat claude_request.log >> claude_debug.log
-          echo -e "\n\nResponse body:" >> claude_debug.log
+          echo -e "\n\nResponse:" >> claude_debug.log
           echo "$CLAUDE_RESPONSE" >> claude_debug.log
           
-          # Extract response text and capture any errors
+          # Display analysis
           echo "Claude Analysis:"
           if [[ -z "$CLAUDE_RESPONSE" ]]; then
-            ERROR_MSG="Analysis not available: (Empty API response - API connection failed)"
-            echo "$ERROR_MSG"
-            echo "$ERROR_MSG" > claude_analysis.txt
+            echo "Analysis not available: (Empty API response)"
           elif echo "$CLAUDE_RESPONSE" | jq -e '.error' > /dev/null; then
             ERROR_TYPE=$(echo "$CLAUDE_RESPONSE" | jq -r '.error.type // "unknown_error"')
             ERROR_MESSAGE=$(echo "$CLAUDE_RESPONSE" | jq -r '.error.message // "No message"')
-            ERROR_MSG="Analysis not available: (API Error: $ERROR_TYPE - $ERROR_MESSAGE)"
-            echo "$ERROR_MSG"
-            echo "$ERROR_MSG" > claude_analysis.txt
+            echo "Analysis not available: (API Error: $ERROR_TYPE - $ERROR_MESSAGE)"
           else
-            echo "$CLAUDE_RESPONSE" | jq -r '.content[0].text // "Analysis not available: (Response format error - no content found)"' | tee claude_analysis.txt
+            echo "$CLAUDE_RESPONSE" | jq -r '.content[0].text // "Analysis not available: (Response format error)"'
           fi
-      
+
+      # Analyze with ChatGPT
       - name: Analyze failure with ChatGPT
         if: failure() && env.OPENAI_API_KEY != '' 
-        id: chatgpt_analysis
         continue-on-error: true
         run: |
-          ERROR_CONTENT=$(cat error_api.txt)
+          ERROR_CONTENT=$(cat error_log.txt)
           
-          # Save JSON to file to avoid escaping issues
+          # Create request
           cat > request.json << 'EOF'
           {
             "model": "gpt-3.5-turbo",
             "messages": [
               {
                 "role": "system",
-                "content": "Kamu adalah asisten AI DevOps. Analisis log CI/CD dan jelaskan kesalahan dengan jelas. Fokus pada error CS utama dan kesalahan syntax. Jelaskan secara ringkas apa yang salah dan cara memperbaikinya. Jangan sertakan kode boilerplate atau informasi sistem yang tidak relevan dengan error utama."
+                "content": "Kamu adalah asisten AI DevOps. Analisis log CI/CD dan jelaskan kesalahan dengan jelas. Fokus pada error CS utama dan kesalahan syntax. Jelaskan secara ringkas apa yang salah dan cara memperbaikinya."
               },
               {
                 "role": "user",
                 "content": 
           EOF
           
-          # Append error content to JSON file - use jq for proper escaping
+          # Append error content
           echo "$ERROR_CONTENT" | jq -Rs '.' >> request.json
           
-          # Close the JSON structure
+          # Close JSON
           cat >> request.json << 'EOF'
               }
             ],
@@ -294,36 +199,31 @@ jobs:
           }
           EOF
           
-          # Call OpenAI API with timeout and verbose output for debugging
+          # Call OpenAI API
           CHATGPT_RESPONSE=$(curl -s -v --max-time 30 -X POST https://api.openai.com/v1/chat/completions \
             -H "Authorization: Bearer $OPENAI_API_KEY" \
             -H "Content-Type: application/json" \
             -d @request.json 2>chatgpt_request.log)
             
-          # Save request JSON and response for debugging
+          # Save request and response to debug log
           echo "Request sent to ChatGPT:" > chatgpt_debug.log
           cat request.json >> chatgpt_debug.log
-          echo -e "\n\nResponse headers:" >> chatgpt_debug.log
-          cat chatgpt_request.log >> chatgpt_debug.log
-          echo -e "\n\nResponse body:" >> chatgpt_debug.log
+          echo -e "\n\nResponse:" >> chatgpt_debug.log
           echo "$CHATGPT_RESPONSE" >> chatgpt_debug.log
           
-          # Extract response text and capture any errors
+          # Display analysis
           echo "ChatGPT Analysis:"
           if [[ -z "$CHATGPT_RESPONSE" ]]; then
-            ERROR_MSG="Analysis not available: (Empty API response - API connection failed)"
-            echo "$ERROR_MSG"
-            echo "$ERROR_MSG" > chatgpt_analysis.txt
+            echo "Analysis not available: (Empty API response)"
           elif echo "$CHATGPT_RESPONSE" | jq -e '.error' > /dev/null; then
             ERROR_TYPE=$(echo "$CHATGPT_RESPONSE" | jq -r '.error.type // "unknown_error"')
             ERROR_MESSAGE=$(echo "$CHATGPT_RESPONSE" | jq -r '.error.message // "No message"')
-            ERROR_MSG="Analysis not available: (API Error: $ERROR_TYPE - $ERROR_MESSAGE)"
-            echo "$ERROR_MSG"
-            echo "$ERROR_MSG" > chatgpt_analysis.txt
+            echo "Analysis not available: (API Error: $ERROR_TYPE - $ERROR_MESSAGE)"
           else
-            echo "$CHATGPT_RESPONSE" | jq -r '.choices[0].message.content // "Analysis not available: (Response format error - no content found)"' | tee chatgpt_analysis.txt
+            echo "$CHATGPT_RESPONSE" | jq -r '.choices[0].message.content // "Analysis not available: (Response format error)"'
           fi
       
+      # Upload logs as artifacts
       - name: Upload error logs as artifacts
         if: failure()
         uses: actions/upload-artifact@v4
@@ -331,15 +231,7 @@ jobs:
           name: error-logs
           path: |
             error_log.txt
-            error_api.txt
-            claude_analysis.txt
-            chatgpt_analysis.txt
             claude_debug.log
             chatgpt_debug.log
-            claude_request.log
-            chatgpt_request.log
-            build.log
-            build_full.log
-            project_files.txt
             **/*.trx
           if-no-files-found: warn
