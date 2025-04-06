@@ -122,7 +122,7 @@ jobs:
           # Create request
           cat > request.json << 'EOF'
           {
-            "model": "claude-3-haiku-20240307",
+            "model": "claude-3-5-haiku-20241022",
             "max_tokens": 1000,
             "system": "Kamu adalah asisten AI DevOps. Analisis log CI/CD dan jelaskan secara ringkas apa yang salah dan cara memperbaikinya.",
             "messages": [
@@ -176,7 +176,7 @@ jobs:
           # Create request
           cat > request.json << 'EOF'
           {
-            "model": "gpt-3.5-turbo",
+            "model": "gpt-4o-mini-2024-07-18",
             "messages": [
               {
                 "role": "system",
