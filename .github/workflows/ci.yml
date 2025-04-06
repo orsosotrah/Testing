@@ -42,10 +42,11 @@ jobs:
           # Save JSON to file to avoid escaping issues
           cat > request.json << EOF
           {
-            "model": "claude-3-haiku-20240307",
+            "model": "claude-2.1",
             "prompt": "\n\nHuman: You are an AI DevOps assistant. Analyze CI/CD logs and explain errors clearly.\n\n$ERROR_CONTENT\n\nAssistant: ",
             "max_tokens_to_sample": 1000,
-            "temperature": 0
+            "temperature": 0,
+            "stop_sequences": ["\n\nHuman:"]
           }
           EOF
           
@@ -61,7 +62,7 @@ jobs:
           echo "$CLAUDE_RESPONSE" | jq -r '.completion // "Analysis not available"'
       
       - name: Analyze failure with ChatGPT
-        if: failure() && env.OPENAI_API_KEY != '' 
+        if: failure() && env.OPENAI_API_KEY != '' && env.ANTHROPIC_API_KEY == ''  
         run: |
           ERROR_CONTENT=$(cat error_log.txt)
           
