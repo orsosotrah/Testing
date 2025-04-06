@@ -120,6 +120,34 @@ jobs:
         if: failure()
         run: |
           mkdir -p logs
+          
+          # Buat file error log ringkas khusus untuk API
+          echo "## Build Failure Log" > error_api.txt
+          echo "Error occurred during the build process." >> error_api.txt
+          echo "" >> error_api.txt
+          
+          # Tambahkan error C# yang paling relevan
+          if [ -f build.log ]; then
+            # File error log ringkas sudah ada (dibuat oleh step Build)
+            grep -E "error CS[0-9]+|Build FAILED|Error\(s\)" build.log >> error_api.txt 2>/dev/null
+          elif [ -f build_full.log ]; then
+            # Jika hanya ada log lengkap, filter untuk mendapatkan error penting saja
+            grep -E "error CS[0-9]+|Build FAILED|Error\(s\)" build_full.log >> error_api.txt 2>/dev/null
+          fi
+          
+          # Cek file C# yang memiliki masalah syntax - HANYA untuk file yang error
+          for cs_file in $(find . -name "*.cs"); do
+            # Cari error yang terkait dengan file ini
+            if [ -f build_full.log ] && grep -q "$cs_file" build_full.log; then
+              echo -e "\n## Problematic Code" >> error_api.txt
+              echo "File: $cs_file" >> error_api.txt
+              head -n 20 "$cs_file" >> error_api.txt
+              echo "..." >> error_api.txt
+              break  # Hanya tampilkan file pertama yang bermasalah
+            fi
+          done
+          
+          # Membuat log lengkap untuk artifact
           echo "## Build Failure Log" > error_log.txt
           echo "Error occurred during the build process." >> error_log.txt
           echo '```' >> error_log.txt
@@ -140,13 +168,6 @@ jobs:
             grep -A 5 -B 2 "error CS" build_full.log >> error_log.txt 2>/dev/null || echo "No CS errors found" >> error_log.txt
             echo "## Build Status" >> error_log.txt
             grep -A 3 -B 1 "Build FAILED" build_full.log >> error_log.txt 2>/dev/null || echo "Build status not found" >> error_log.txt
-          fi
-          
-          # Tangkap error MSB1003 jika ada
-          if grep -q "MSB1003" build_full.log 2>/dev/null || grep -q "MSB1003" build.log 2>/dev/null; then
-            echo "## MSB1003 Error Detected" >> error_log.txt
-            echo "Error: Tidak dapat menemukan project atau solution file." >> error_log.txt
-            echo "Working directory: $(pwd)" >> error_log.txt
           fi
           
           # Cek file C# yang memiliki masalah syntax
@@ -185,7 +206,7 @@ jobs:
         id: claude_analysis
         continue-on-error: true
         run: |
-          ERROR_CONTENT=$(cat error_log.txt)
+          ERROR_CONTENT=$(cat error_api.txt)
           
           # Save JSON to file to avoid escaping issues
           cat > request.json << 'EOF'
@@ -245,7 +266,7 @@ jobs:
         id: chatgpt_analysis
         continue-on-error: true
         run: |
-          ERROR_CONTENT=$(cat error_log.txt)
+          ERROR_CONTENT=$(cat error_api.txt)
           
           # Save JSON to file to avoid escaping issues
           cat > request.json << 'EOF'
@@ -310,6 +331,7 @@ jobs:
           name: error-logs
           path: |
             error_log.txt
+            error_api.txt
             claude_analysis.txt
             chatgpt_analysis.txt
             claude_debug.log
